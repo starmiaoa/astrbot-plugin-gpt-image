@@ -8,7 +8,7 @@ GPT Image 图片生成插件，支持所有 GPT Image 系列模型。
 - `/改图`：图生图/图片编辑，自动读取当前消息图片和回复/引用消息里的图片。
 - 或者自然语言描述 模型会自动调用工具进行生成
 
-(ps:注意 OpenAI 官方 Images API、标准 OpenAI 兼容接口 只是一种格式,并不是代表你一定要用openai官方提供的api 只要你的中转站提供的是这个官方格式,那么你就可以用 OpenAI 官方 / 标准兼容接口 来生成图片)
+`(ps:注意 OpenAI 官方 Images API、标准 OpenAI 兼容接口 只是一种格式,并不是代表你一定要用openai官方提供的api 只要你的中转站提供的是这个官方格式,那么你就可以用 OpenAI 官方 / 标准兼容接口 来生成图片)`
 
 ## 配置
 
@@ -35,7 +35,7 @@ GPT Image 图片生成插件，支持所有 GPT Image 系列模型。
 
 `image.size`、`image.resolution` 和 `image.aspect_ratio` 是三个不同概念：`size` 是具体像素尺寸，`resolution` 是 1K/2K/4K 清晰度档位，`aspect_ratio` 是画面比例。命令里显式传 `--size`、`--ratio` 或 `--resolution` 时，显式参数优先。
 
-(ps:那些用官方标准 OpenAI 兼容接口的模型似乎不能用图片比例,只能用具体像素尺寸 但是网页逆向的可以使用图片比例,不能使用具体像素尺寸 官方标准 OpenAI 兼容接口的参数请参考官方文档https://platform.openai.com/docs/api-reference/images/create)
+`(ps:那些用官方标准 OpenAI 兼容接口的模型似乎不能用图片比例,只能用具体像素尺寸 但是网页逆向的可以使用图片比例,不能使用具体像素尺寸 官方标准 OpenAI 兼容接口的参数请参考官方文档https://platform.openai.com/docs/api-reference/images/create)`
 
 ## 命令
 
