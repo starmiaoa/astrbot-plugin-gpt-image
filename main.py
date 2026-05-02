@@ -95,7 +95,7 @@ DEFAULT_TOOL_GUIDE = """
 
 @register(
     PLUGIN_ID,
-    "3299332656-netizen",
+    "starmiaoa",
     "兼容全部 GPT 图像生成模型，支持 OpenAI 官方接口和网页 2api 接口",
     "1.1.2",
 )
