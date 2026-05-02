@@ -43,9 +43,9 @@ GPT Image 图片生成插件，支持所有 GPT Image 系列模型。
 /生图 一个二次元人物 
 /生图 一只赛博猫坐在霓虹窗边 --ratio 16:9 --resolution 2k --quality high
 /生图 扁平图标，一个透明背景的蓝色火箭 --transparent --style flat icon --ratio 1:1
+/改图 把这张图任务二次元化，背景不变
 /改图 把背景换成夜晚城市，保留人物姿势 --resolution 2k
 /改图 把这几张图合成一张电影海报 --ratio 2:3 --quality high
-/改图 一个二次元人物 
 ```
 
 可用参数：
