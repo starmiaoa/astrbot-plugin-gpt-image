@@ -1,5 +1,5 @@
 name: astrbot_plugin_gpt_image_2
-desc: 兼容全部的 GPT 图像生成模型，支持 OpenAI 官方接口、标准 OpenAI 兼容接口和网页 2api/ToAPIs 接口，为 AstrBot 提供生图、改图命令和 LLM 函数工具
+desc: GPT Image 图片生成插件，支持所有 GPT Image 系列模型；支持手动 /生图、/改图 调用，也支持 LLM 通过函数工具自主调用
 display_name: GPT Image 图像生成
 version: 1.1.2
 author: starmiaoa

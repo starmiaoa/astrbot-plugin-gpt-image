@@ -96,7 +96,7 @@ DEFAULT_TOOL_GUIDE = """
 @register(
     PLUGIN_ID,
     "starmiaoa",
-    "兼容全部 GPT 图像生成模型，支持 OpenAI 官方接口和网页 2api 接口",
+    "GPT Image 图片生成插件，支持所有 GPT Image 系列模型",
     "1.1.2",
 )
 class GPTImage2Plugin(Star):

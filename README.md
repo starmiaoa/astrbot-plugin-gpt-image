@@ -1,8 +1,8 @@
 # GPT Image 图像生成
 
-兼容全部的 GPT 图像生成模型。只要模型供应商提供 OpenAI 官方 Images API、标准 OpenAI 兼容接口，或网页 2api/ToAPIs 接口，就可以通过配置模型名、Base URL 和 Key 接入。
+GPT Image 图片生成插件，支持所有 GPT Image 系列模型。
 
-这个插件给 AstrBot 增加 GPT 图像生成和改图能力：
+支持手动使用 `/生图`、`/改图` 调用，也支持 LLM 通过函数工具自主调用。只要模型供应商提供 OpenAI 官方 Images API、标准 OpenAI 兼容接口，或网页 2api/ToAPIs 接口，就可以通过配置模型名、Base URL 和 Key 接入。
 
 - `/生图`：文生图。
 - `/改图`：图生图/图片编辑，自动读取当前消息图片和回复/引用消息里的图片。
