@@ -1,0 +1,188 @@
+{
+  "openai": {
+    "description": "OpenAI 官方 / 标准兼容接口",
+    "type": "object",
+    "hint": "模型供应商如果提供 OpenAI 官方接口或标准 OpenAI-compatible Images API，就打开这里；如果提供的是网页逆向/2api/ToAPIs 渠道，就使用下面的 2api 配置。",
+    "items": {
+      "enabled": {
+        "description": "启用 OpenAI 官方 / 标准兼容接口",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后使用这一组 base_url、api_key 和模型名。"
+      },
+      "api_key": {
+        "description": "OpenAI API Key",
+        "type": "string",
+        "default": "",
+        "hint": "OpenAI 或兼容站 API Key。留空时读取环境变量 OPENAI_API_KEY。"
+      },
+      "base_url": {
+        "description": "OpenAI Base URL",
+        "type": "string",
+        "default": "https://api.openai.com/v1",
+        "hint": "填到 /v1 即可，例如 https://api.openai.com/v1；插件会自动补 /images/generations 或 /images/edits。"
+      },
+      "model": {
+        "description": "OpenAI 模型名",
+        "type": "string",
+        "default": "gpt-image-2",
+        "hint": "默认 gpt-image-2；兼容站按实际模型名填写。"
+      },
+      "timeout_seconds": {
+        "description": "请求超时秒数",
+        "type": "int",
+        "default": 180,
+        "hint": "图像生成可能较慢，建议 120-300 秒。"
+      }
+    }
+  },
+  "two_api": {
+    "description": "2api / ToAPIs 网页逆向渠道",
+    "type": "object",
+    "hint": "模型供应商如果提供的是网页逆向/2api/ToAPIs 渠道，就打开这里；如果提供的是 OpenAI 官方接口或标准 OpenAI 兼容接口，就使用上面的 OpenAI 官方 / 标准兼容接口。",
+    "items": {
+      "enabled": {
+        "description": "启用网页逆向渠道",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后使用这一组 base_url、api_key 和模型名，适合网页逆向/2api/ToAPIs 供应商。"
+      },
+      "api_key": {
+        "description": "网页逆向渠道 API Key",
+        "type": "string",
+        "default": "",
+        "hint": "网页逆向/2api/ToAPIs 渠道的 API Key。留空时读取 TWO_API_KEY，再回退到 OPENAI_API_KEY。"
+      },
+      "base_url": {
+        "description": "2api Base URL",
+        "type": "string",
+        "default": "",
+        "hint": "填到 /v1 即可；如果只填根地址，插件也会自动补 /v1/images/generations。"
+      },
+      "model": {
+        "description": "2api 模型名",
+        "type": "string",
+        "default": "gpt-image-2",
+        "hint": "不同 2api 渠道模型名可能不同，例如 gpt-image-2、gpt-image-2-all、gpt-image-1.5-official；按你的渠道要求填写。"
+      },
+      "timeout_seconds": {
+        "description": "任务超时秒数",
+        "type": "int",
+        "default": 180,
+        "hint": "图像生成可能较慢，建议 120-300 秒；部分供应商可设更高。"
+      }
+    }
+  },
+  "image": {
+    "description": "图片参数",
+    "type": "object",
+    "hint": "size 是像素尺寸，resolution 是 1k/2k/4k 清晰度档位，aspect_ratio 是画面比例。命令或 LLM 工具里显式传参会覆盖默认值。",
+    "items": {
+      "size": {
+        "description": "默认像素尺寸",
+        "type": "string",
+        "default": "auto",
+        "options": ["auto", "1024x1024", "1536x1024", "1024x1536"],
+        "hint": "宽x高像素。auto 表示不主动传 size；方图 1024x1024，横图 1536x1024，竖图 1024x1536。部分兼容站支持更多像素尺寸。"
+      },
+      "resolution": {
+        "description": "默认分辨率",
+        "type": "string",
+        "default": "1k",
+        "options": ["auto", "1k", "2k", "4k"],
+        "hint": "GPT 图像模型的清晰度档位。供应商支持时会生效；不支持时可能会忽略。"
+      },
+      "aspect_ratio": {
+        "description": "默认比例",
+        "type": "string",
+        "default": "auto",
+        "options": ["auto", "1:1", "3:2", "2:3", "4:3", "3:4", "5:4", "4:5", "16:9", "9:16", "2:1", "1:2", "21:9", "9:21"],
+        "hint": "画面比例。支持比例参数的兼容站会按比例出图；OpenAI 官方接口会近似映射为方图、横图或竖图。改图没传比例时优先跟随第一张参考图比例。"
+      },
+      "quality": {
+        "description": "默认质量",
+        "type": "string",
+        "default": "auto",
+        "options": ["auto", "low", "medium", "high"],
+        "hint": "日常建议 auto。需要精细成品图时可选 high。"
+      },
+      "output_format": {
+        "description": "输出格式",
+        "type": "string",
+        "default": "png",
+        "options": ["png", "jpeg", "webp"],
+        "hint": "透明背景建议使用 png 或 webp。"
+      },
+      "background": {
+        "description": "背景",
+        "type": "string",
+        "default": "auto",
+        "options": ["auto", "transparent", "opaque"],
+        "hint": "transparent 用于透明背景。供应商如果不支持该字段，可能会忽略或报错。"
+      },
+      "max_reference_images": {
+        "description": "最多参考图数量",
+        "type": "int",
+        "default": 16,
+        "slider": {"min": 1, "max": 16, "step": 1},
+        "hint": "GPT 图像编辑接口最多支持 16 张参考图，插件会自动截断到这个上限。"
+      }
+    }
+  },
+  "prompt": {
+    "description": "提示词处理",
+    "type": "object",
+    "hint": "可选。给所有生成/改图请求统一追加提示词。",
+    "items": {
+      "prompt_prefix": {
+        "description": "统一前缀",
+        "type": "string",
+        "default": "",
+        "hint": "会放在用户提示词前面。"
+      },
+      "prompt_suffix": {
+        "description": "统一后缀",
+        "type": "string",
+        "default": "",
+        "hint": "会放在用户提示词后面。"
+      },
+      "negative_prompt": {
+        "description": "避免内容",
+        "type": "string",
+        "default": "",
+        "hint": "图像接口没有独立 negative prompt，本插件会把它追加成 Avoid: ...。"
+      }
+    }
+  },
+  "runtime": {
+    "description": "运行设置",
+    "type": "object",
+    "hint": "函数工具和工具说明默认启用；如需禁用工具，请在 AstrBot 自带的函数工具开关里关闭 generate_image_with_gpt_image_2。",
+    "items": {
+      "llm_tool_foreground_wait_seconds": {
+        "description": "LLM 工具前台等待秒数",
+        "type": "int",
+        "default": 0,
+        "hint": "0 表示工具立刻返回短句给模型，让模型按自己人设告诉用户；生成完成后自动发图。"
+      },
+      "max_concurrent": {
+        "description": "最大并发生成数",
+        "type": "int",
+        "default": 1,
+        "hint": "防止多张图同时生成导致接口或带宽压力过大。"
+      },
+      "cache_ttl_hours": {
+        "description": "图片缓存保留小时数",
+        "type": "int",
+        "default": 72,
+        "hint": "生成图片会保存在插件数据目录，超过该时间会在下一次生成后清理。0 表示不按时间清理。"
+      },
+      "max_cache_files": {
+        "description": "最多缓存文件数",
+        "type": "int",
+        "default": 200,
+        "hint": "超过数量后删除最旧文件。0 表示不按数量清理。"
+      }
+    }
+  }
+}
