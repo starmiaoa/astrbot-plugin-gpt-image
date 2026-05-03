@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import mimetypes
 import os
@@ -78,6 +79,7 @@ DEFAULT_TOOL_GUIDE = """
 - 用户明确说“画/生成/做一张/设计/渲染/出图/海报/头像/壁纸/贴纸/图标/mockup/产品概念图”等，调用工具并保持 `use_reference_images=false`。
 - 用户说“改这张/把图里的/参考上图/照着这几张/换背景/保留主体/合成这些图/用这些图做...”且当前消息或引用消息里有图片，调用工具并设置 `use_reference_images=true`。
 - 如果用户想改图但没有发图或引用图，不要调用工具，先请用户发送或引用图片。
+- 同一个用户需求只调用一次工具 除非用户明确要求多张图或多个版本 不要重复调用
 
 参数怎么传：
 - `prompt` 写完整、具体、可独立理解的视觉需求。改图时说明要保留什么、改变什么、参考图之间的关系。
@@ -89,7 +91,7 @@ DEFAULT_TOOL_GUIDE = """
 - `style` 可放额外风格词，比如写实、动漫、水彩、产品渲染、扁平图标。
 - GPT 图像编辑最多会读取 16 张参考图；插件会自动从当前消息和引用消息里收集。
 
-工具返回状态后，按你当前的人格和语气自然回应用户，让用户知道这次图像任务已经接下并开始处理即可。回复长短、断句和标点都跟随你的人设与上下文；不要复述工具返回文本，不要补充技术细节或具体耗时。
+工具返回状态后 只按你当前的人格和语气回复一句确认 让用户知道这次图像任务已经接下并开始处理 不要复述工具返回文本 不要补充技术细节或具体耗时 不要再次调用同一个工具
 """.strip()
 
 
@@ -110,6 +112,7 @@ class GPTImage2Plugin(Star):
         max_concurrent = self._int_cfg("runtime", "max_concurrent", 1)
         self._semaphore = asyncio.Semaphore(max(1, max_concurrent))
         self._background_tasks: set[asyncio.Task[Any]] = set()
+        self._inflight_tool_tasks: dict[str, asyncio.Task[tuple[str, str | None]]] = {}
 
     @filter.command("生图")
     async def generate_command(self, event: AstrMessageEvent):
@@ -121,7 +124,7 @@ class GPTImage2Plugin(Star):
             )
             return
 
-        yield event.plain_result("收到 我这边开始处理了")
+        yield event.plain_result(self._tool_submitted_message())
         try:
             image_path, revised_prompt = await self._generate_image(
                 prompt=prompt,
@@ -154,7 +157,7 @@ class GPTImage2Plugin(Star):
             yield event.plain_result("没有找到可用参考图。请在同一条消息里发图，或回复/引用一张图后再使用 /改图。")
             return
 
-        yield event.plain_result("收到 我这边开始处理了")
+        yield event.plain_result(self._tool_submitted_message())
         try:
             image_path, revised_prompt = await self._generate_image(
                 prompt=prompt,
@@ -231,6 +234,23 @@ class GPTImage2Plugin(Star):
             if not reference_paths:
                 return "没有找到参考图。请先发送或引用一张图片，再说明要怎么改。"
 
+        request_key = self._tool_request_key(
+            event,
+            prompt=prompt,
+            size=size,
+            aspect_ratio=aspect_ratio,
+            resolution=resolution,
+            quality=quality,
+            style=style,
+            transparent_background=transparent_background,
+            reference_paths=reference_paths,
+        )
+        existing_task = self._inflight_tool_tasks.get(request_key)
+        if existing_task and not existing_task.done():
+            return self._tool_submitted_message(reference_count=len(reference_paths))
+        if existing_task and existing_task.done():
+            self._inflight_tool_tasks.pop(request_key, None)
+
         wait_seconds = max(0, self._int_cfg("runtime", "llm_tool_foreground_wait_seconds", 0))
         task = asyncio.create_task(
             self._generate_image(
@@ -244,6 +264,13 @@ class GPTImage2Plugin(Star):
                 reference_image_paths=reference_paths,
             )
         )
+        self._inflight_tool_tasks[request_key] = task
+
+        def _clear_inflight(done_task: asyncio.Task[tuple[str, str | None]]) -> None:
+            if self._inflight_tool_tasks.get(request_key) is done_task:
+                self._inflight_tool_tasks.pop(request_key, None)
+
+        task.add_done_callback(_clear_inflight)
 
         try:
             if wait_seconds == 0:
@@ -550,7 +577,60 @@ class GPTImage2Plugin(Star):
 
     def _tool_submitted_message(self, *, reference_count: int = 0) -> str:
         del reference_count
-        return "任务状态：已接收并开始处理。请按当前人格自然回应用户，表达你已经接下这次图像任务；不要复述这段状态，不要说明技术细节或具体耗时。"
+        return "收到 开始画了"
+
+    def _tool_request_key(
+        self,
+        event: AstrMessageEvent,
+        *,
+        prompt: str,
+        size: str,
+        aspect_ratio: str,
+        resolution: str,
+        quality: str,
+        style: str,
+        transparent_background: bool,
+        reference_paths: list[str],
+    ) -> str:
+        payload = {
+            "scope": self._event_scope_key(event),
+            "prompt": prompt.strip(),
+            "size": (size or "").strip(),
+            "aspect_ratio": (aspect_ratio or "").strip(),
+            "resolution": (resolution or "").strip(),
+            "quality": (quality or "").strip(),
+            "style": (style or "").strip(),
+            "transparent_background": bool(transparent_background),
+            "reference_paths": [str(Path(path).resolve()) for path in reference_paths],
+        }
+        raw = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def _event_scope_key(self, event: AstrMessageEvent) -> str:
+        parts: list[str] = []
+        for name in ("unified_msg_origin", "session_id"):
+            value = getattr(event, name, None)
+            if value:
+                parts.append(str(value))
+
+        message_obj = getattr(event, "message_obj", None)
+        for name in ("session_id", "group_id", "sender_id", "user_id"):
+            value = getattr(message_obj, name, None)
+            if value:
+                parts.append(str(value))
+
+        for name in ("get_session_id", "get_group_id", "get_sender_id"):
+            method = getattr(event, name, None)
+            if not callable(method):
+                continue
+            try:
+                value = method()
+            except Exception:
+                continue
+            if value:
+                parts.append(str(value))
+
+        return "|".join(dict.fromkeys(parts)) or "global"
 
     def _parse_inline_options(self, text: str) -> tuple[dict[str, Any], str]:
         opts: dict[str, Any] = {
