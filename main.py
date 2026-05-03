@@ -89,7 +89,7 @@ DEFAULT_TOOL_GUIDE = """
 - `style` 可放额外风格词，比如写实、动漫、水彩、产品渲染、扁平图标。
 - GPT 图像编辑最多会读取 16 张参考图；插件会自动从当前消息和引用消息里收集。
 
-工具返回短句时，你需要按你自己的人格设定，用很短的自然语气确认图像任务正在进行。短句或短语都可以，不要求标点。不要补充技术细节，不要承诺具体耗时，也不要补充后续发送说明。
+工具返回状态后，按你当前的人格和语气自然回应用户，让用户知道这次图像任务已经接下并开始处理即可。回复长短、断句和标点都跟随你的人设与上下文；不要复述工具返回文本，不要补充技术细节或具体耗时。
 """.strip()
 
 
@@ -121,7 +121,7 @@ class GPTImage2Plugin(Star):
             )
             return
 
-        yield event.plain_result("收到 图像任务正在进行")
+        yield event.plain_result("收到 我这边开始处理了")
         try:
             image_path, revised_prompt = await self._generate_image(
                 prompt=prompt,
@@ -154,7 +154,7 @@ class GPTImage2Plugin(Star):
             yield event.plain_result("没有找到可用参考图。请在同一条消息里发图，或回复/引用一张图后再使用 /改图。")
             return
 
-        yield event.plain_result("收到 图像任务正在进行")
+        yield event.plain_result("收到 我这边开始处理了")
         try:
             image_path, revised_prompt = await self._generate_image(
                 prompt=prompt,
@@ -205,9 +205,11 @@ class GPTImage2Plugin(Star):
         transform, combine, or follow images attached to the current message or quoted/replied
         message. Do not use it for normal text-only answers.
 
-        The tool sends the finished image directly to the user. If it starts a background task,
-        tell the user in your own persona, using a very short acknowledgement or phrase, that the image task
-        is underway. Punctuation is not required. Do not mention technical details, timing, or automatic delivery.
+        The tool sends the finished image directly to the user. After the tool reports
+        background-task status, respond in your persona and naturally let the user know
+        you accepted the image task and started working on it. Let length, phrasing, and
+        punctuation follow your persona and context. Do not repeat the tool status text
+        or mention technical details or timing.
 
         Args:
             prompt(string): Required. A complete, concrete image prompt describing subject, style, composition, colors, lighting, text to include if any, and constraints from the user.
@@ -548,7 +550,7 @@ class GPTImage2Plugin(Star):
 
     def _tool_submitted_message(self, *, reference_count: int = 0) -> str:
         del reference_count
-        return "图像任务正在进行"
+        return "任务状态：已接收并开始处理。请按当前人格自然回应用户，表达你已经接下这次图像任务；不要复述这段状态，不要说明技术细节或具体耗时。"
 
     def _parse_inline_options(self, text: str) -> tuple[dict[str, Any], str]:
         opts: dict[str, Any] = {
