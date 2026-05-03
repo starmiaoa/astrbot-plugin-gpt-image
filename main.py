@@ -89,7 +89,7 @@ DEFAULT_TOOL_GUIDE = """
 - `style` 可放额外风格词，比如写实、动漫、水彩、产品渲染、扁平图标。
 - GPT 图像编辑最多会读取 16 张参考图；插件会自动从当前消息和引用消息里收集。
 
-工具返回短句时，你需要按你自己的人格设定，只用一句很短的自然语气确认图像任务正在进行。不要补充技术细节，不要承诺具体耗时，也不要补充后续发送说明。
+工具返回短句时，你需要按你自己的人格设定，用很短的自然语气确认图像任务正在进行。短句或短语都可以，不要求标点。不要补充技术细节，不要承诺具体耗时，也不要补充后续发送说明。
 """.strip()
 
 
@@ -121,7 +121,7 @@ class GPTImage2Plugin(Star):
             )
             return
 
-        yield event.plain_result("收到，图像任务正在进行。")
+        yield event.plain_result("收到 图像任务正在进行")
         try:
             image_path, revised_prompt = await self._generate_image(
                 prompt=prompt,
@@ -154,7 +154,7 @@ class GPTImage2Plugin(Star):
             yield event.plain_result("没有找到可用参考图。请在同一条消息里发图，或回复/引用一张图后再使用 /改图。")
             return
 
-        yield event.plain_result("收到，图像任务正在进行。")
+        yield event.plain_result("收到 图像任务正在进行")
         try:
             image_path, revised_prompt = await self._generate_image(
                 prompt=prompt,
@@ -206,8 +206,8 @@ class GPTImage2Plugin(Star):
         message. Do not use it for normal text-only answers.
 
         The tool sends the finished image directly to the user. If it starts a background task,
-        tell the user in your own persona, using exactly one short sentence, that the image task
-        is underway. Do not mention technical details, timing, or automatic delivery.
+        tell the user in your own persona, using a very short acknowledgement or phrase, that the image task
+        is underway. Punctuation is not required. Do not mention technical details, timing, or automatic delivery.
 
         Args:
             prompt(string): Required. A complete, concrete image prompt describing subject, style, composition, colors, lighting, text to include if any, and constraints from the user.
@@ -548,7 +548,7 @@ class GPTImage2Plugin(Star):
 
     def _tool_submitted_message(self, *, reference_count: int = 0) -> str:
         del reference_count
-        return "图像任务正在进行。"
+        return "图像任务正在进行"
 
     def _parse_inline_options(self, text: str) -> tuple[dict[str, Any], str]:
         opts: dict[str, Any] = {
