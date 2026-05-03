@@ -23,7 +23,7 @@ import aiohttp
 
 from astrbot.api import llm_tool, logger
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.message_components import Image, Plain
+from astrbot.api.message_components import Image
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, register
 from astrbot.core.provider.func_tool_manager import FunctionToolManager
@@ -89,7 +89,7 @@ DEFAULT_TOOL_GUIDE = """
 - `style` 可放额外风格词，比如写实、动漫、水彩、产品渲染、扁平图标。
 - GPT 图像编辑最多会读取 16 张参考图；插件会自动从当前消息和引用消息里收集。
 
-工具返回短句时，你需要按你自己的人格设定，用很短的自然语气告诉用户已经收到并开始画了。可以说“好，收到”“我开始画了”这一类话，并说明完成后会自动发到当前聊天。不要补充技术细节，也不要承诺具体耗时。
+工具返回短句时，你需要按你自己的人格设定，只用一句很短的自然语气确认图像任务正在进行。不要补充技术细节，不要承诺具体耗时，也不要补充后续发送说明。
 """.strip()
 
 
@@ -121,7 +121,7 @@ class GPTImage2Plugin(Star):
             )
             return
 
-        yield event.plain_result("好，收到，开始生成了。")
+        yield event.plain_result("收到，图像任务正在进行。")
         try:
             image_path, revised_prompt = await self._generate_image(
                 prompt=prompt,
@@ -154,7 +154,7 @@ class GPTImage2Plugin(Star):
             yield event.plain_result("没有找到可用参考图。请在同一条消息里发图，或回复/引用一张图后再使用 /改图。")
             return
 
-        yield event.plain_result("好，收到，开始改图了。")
+        yield event.plain_result("收到，图像任务正在进行。")
         try:
             image_path, revised_prompt = await self._generate_image(
                 prompt=prompt,
@@ -206,8 +206,8 @@ class GPTImage2Plugin(Star):
         message. Do not use it for normal text-only answers.
 
         The tool sends the finished image directly to the user. If it starts a background task,
-        tell the user in your own persona that the image is being generated and will be sent
-        automatically when ready.
+        tell the user in your own persona, using exactly one short sentence, that the image task
+        is underway. Do not mention technical details, timing, or automatic delivery.
 
         Args:
             prompt(string): Required. A complete, concrete image prompt describing subject, style, composition, colors, lighting, text to include if any, and constraints from the user.
@@ -543,19 +543,12 @@ class GPTImage2Plugin(Star):
         return "\n\n".join(parts).strip()
 
     def _build_result_chain(self, image_path: str, revised_prompt: str | None) -> list[Any]:
-        chain: list[Any] = []
-        if self._bool_cfg("runtime", "send_text_caption", True):
-            text = "图片已生成。"
-            if revised_prompt and self._bool_cfg("runtime", "show_revised_prompt", False):
-                text += f"\nRevised prompt: {revised_prompt}"
-            chain.append(Plain(text))
-        chain.append(Image.fromFileSystem(image_path))
-        return chain
+        del revised_prompt
+        return [Image.fromFileSystem(image_path)]
 
     def _tool_submitted_message(self, *, reference_count: int = 0) -> str:
-        if reference_count:
-            return "好，收到，开始改图了。完成后会自动发到这里。"
-        return "好，收到，开始生成了。完成后会自动发到这里。"
+        del reference_count
+        return "图像任务正在进行。"
 
     def _parse_inline_options(self, text: str) -> tuple[dict[str, Any], str]:
         opts: dict[str, Any] = {
