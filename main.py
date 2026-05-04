@@ -116,6 +116,7 @@ class GPTImage2Plugin(Star):
 
     @filter.command("生图")
     async def generate_command(self, event: AstrMessageEvent):
+        event.stop_event()
         prompt = self._extract_command_prompt(event, ("生图",))
         opts, prompt = self._parse_inline_options(prompt)
         if not prompt:
@@ -124,9 +125,8 @@ class GPTImage2Plugin(Star):
             )
             return
 
-        yield event.plain_result(self._tool_submitted_message())
-        try:
-            image_path, revised_prompt = await self._generate_image(
+        task = asyncio.create_task(
+            self._generate_image(
                 prompt=prompt,
                 size=opts.get("size"),
                 aspect_ratio=opts.get("aspect_ratio"),
@@ -135,6 +135,12 @@ class GPTImage2Plugin(Star):
                 style=opts.get("style"),
                 transparent_background=opts.get("transparent_background", False),
             )
+        )
+        await asyncio.sleep(0)
+        if not task.done():
+            yield event.plain_result(self._tool_submitted_message())
+        try:
+            image_path, revised_prompt = await task
         except Exception as exc:
             logger.error("GPT Image /生图 command failed", exc_info=True)
             yield event.plain_result(f"图片生成失败：{self._friendly_error(exc)}")
@@ -144,6 +150,7 @@ class GPTImage2Plugin(Star):
 
     @filter.command("改图")
     async def edit_command(self, event: AstrMessageEvent):
+        event.stop_event()
         prompt = self._extract_command_prompt(event, ("改图",))
         opts, prompt = self._parse_inline_options(prompt)
         if not prompt:
@@ -157,9 +164,8 @@ class GPTImage2Plugin(Star):
             yield event.plain_result("没有找到可用参考图。请在同一条消息里发图，或回复/引用一张图后再使用 /改图。")
             return
 
-        yield event.plain_result(self._tool_submitted_message())
-        try:
-            image_path, revised_prompt = await self._generate_image(
+        task = asyncio.create_task(
+            self._generate_image(
                 prompt=prompt,
                 size=opts.get("size"),
                 aspect_ratio=opts.get("aspect_ratio"),
@@ -169,6 +175,12 @@ class GPTImage2Plugin(Star):
                 transparent_background=opts.get("transparent_background", False),
                 reference_image_paths=reference_paths,
             )
+        )
+        await asyncio.sleep(0)
+        if not task.done():
+            yield event.plain_result(self._tool_submitted_message())
+        try:
+            image_path, revised_prompt = await task
         except Exception as exc:
             logger.error("GPT Image /改图 command failed", exc_info=True)
             yield event.plain_result(f"图片修改失败：{self._friendly_error(exc)}")
@@ -178,6 +190,7 @@ class GPTImage2Plugin(Star):
 
     @filter.command("生图帮助")
     async def gptimage_help(self, event: AstrMessageEvent):
+        event.stop_event()
         yield event.plain_result(
             "GPT Image 图像生成插件已加载。\n"
             "命令：/生图 提示词；/改图 提示词（同消息发图，或回复/引用图片）。\n"
