@@ -79,7 +79,7 @@ DEFAULT_TOOL_GUIDE = """
 - 用户明确说“画/生成/做一张/设计/渲染/出图/海报/头像/壁纸/贴纸/图标/mockup/产品概念图”等，调用工具并保持 `use_reference_images=false`。
 - 用户说“改这张/把图里的/参考上图/照着这几张/换背景/保留主体/合成这些图/用这些图做...”且当前消息或引用消息里有图片，调用工具并设置 `use_reference_images=true`。
 - 如果用户想改图但没有发图或引用图，不要调用工具，先请用户发送或引用图片。
-- 同一个用户需求只调用一次工具 除非用户明确要求多张图或多个版本 不要重复调用
+- 同一条用户消息最多调用一次工具 先生成一张图 除非用户后续继续要求修改或再生成 不要在同一轮对话里重复调用
 
 参数怎么传：
 - `prompt` 写完整、具体、可独立理解的视觉需求。改图时说明要保留什么、改变什么、参考图之间的关系。
@@ -113,6 +113,7 @@ class GPTImage2Plugin(Star):
         self._semaphore = asyncio.Semaphore(max(1, max_concurrent))
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._inflight_tool_tasks: dict[str, asyncio.Task[tuple[str, str | None]]] = {}
+        self._inflight_tool_turns: dict[str, asyncio.Task[tuple[str, str | None]]] = {}
 
     @filter.command("生图")
     async def generate_command(self, event: AstrMessageEvent):
@@ -221,7 +222,7 @@ class GPTImage2Plugin(Star):
         transform, combine, or follow images attached to the current message or quoted/replied
         message. Do not use it for normal text-only answers.
 
-        The tool sends the finished image directly to the user. After the tool reports
+        Call this tool at most once for one user message. The tool sends the finished image directly to the user. After the tool reports
         background-task status, respond in your persona and naturally let the user know
         you accepted the image task and started working on it. Let length, phrasing, and
         punctuation follow your persona and context. Do not repeat the tool status text
@@ -246,6 +247,13 @@ class GPTImage2Plugin(Star):
             reference_paths = await self._collect_reference_image_paths(event)
             if not reference_paths:
                 return "没有找到参考图。请先发送或引用一张图片，再说明要怎么改。"
+
+        turn_key = self._tool_turn_key(event)
+        turn_task = self._inflight_tool_turns.get(turn_key)
+        if turn_task and not turn_task.done():
+            return self._tool_submitted_message(reference_count=len(reference_paths))
+        if turn_task and turn_task.done():
+            self._inflight_tool_turns.pop(turn_key, None)
 
         request_key = self._tool_request_key(
             event,
@@ -278,10 +286,13 @@ class GPTImage2Plugin(Star):
             )
         )
         self._inflight_tool_tasks[request_key] = task
+        self._inflight_tool_turns[turn_key] = task
 
         def _clear_inflight(done_task: asyncio.Task[tuple[str, str | None]]) -> None:
             if self._inflight_tool_tasks.get(request_key) is done_task:
                 self._inflight_tool_tasks.pop(request_key, None)
+            if self._inflight_tool_turns.get(turn_key) is done_task:
+                self._inflight_tool_turns.pop(turn_key, None)
 
         task.add_done_callback(_clear_inflight)
 
@@ -618,6 +629,43 @@ class GPTImage2Plugin(Star):
         }
         raw = json.dumps(payload, sort_keys=True, ensure_ascii=False)
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def _tool_turn_key(self, event: AstrMessageEvent) -> str:
+        payload = {
+            "scope": self._event_scope_key(event),
+            "message": self._event_message_key(event),
+        }
+        raw = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def _event_message_key(self, event: AstrMessageEvent) -> str:
+        parts: list[str] = []
+        message_obj = getattr(event, "message_obj", None)
+        for name in ("message_id", "msg_id", "id", "seq"):
+            value = getattr(message_obj, name, None)
+            if value:
+                parts.append(str(value))
+
+        for name in ("get_message_id", "get_msg_id"):
+            method = getattr(event, name, None)
+            if not callable(method):
+                continue
+            try:
+                value = method()
+            except Exception:
+                continue
+            if value:
+                parts.append(str(value))
+
+        text = ""
+        try:
+            text = str(getattr(event, "message_str", "") or event.get_message_str() or "")
+        except Exception:
+            text = str(getattr(event, "message_str", "") or "")
+        if text:
+            parts.append(hashlib.sha256(text.encode("utf-8")).hexdigest()[:16])
+
+        return "|".join(dict.fromkeys(parts)) or "unknown-message"
 
     def _event_scope_key(self, event: AstrMessageEvent) -> str:
         parts: list[str] = []
