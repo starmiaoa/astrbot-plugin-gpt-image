@@ -73,12 +73,14 @@ OPENAI_SIZE_TO_RATIO = {
 DEFAULT_TOOL_GUIDE = """
 # GPT Image 画图工具使用说明
 
-你可以调用 `generate_image_with_gpt_image_2` 工具生成或修改图片。普通文字问答不要调用它。
+你可以调用 `generate_image_with_gpt_image_2` 工具生成或修改图片。这个工具会真的提交图片生成任务 普通文字问答不要调用它。
 
 什么时候调用：
-- 用户明确说“画/生成/做一张/设计/渲染/出图/海报/头像/壁纸/贴纸/图标/mockup/产品概念图”等，调用工具并保持 `use_reference_images=false`。
-- 用户说“改这张/把图里的/参考上图/照着这几张/换背景/保留主体/合成这些图/用这些图做...”且当前消息或引用消息里有图片，调用工具并设置 `use_reference_images=true`。
-- 如果用户想改图但没有发图或引用图，不要调用工具，先请用户发送或引用图片。
+- 只有用户明确要求你现在输出一张图片时才调用 例如“画一张...”“生成一张图...”“出图...”“做一张海报/头像/壁纸/图标...”。
+- 只有用户明确要求修改图片 且当前消息或引用消息里有图片时才设置 `use_reference_images=true` 例如“改这张图...”“把图里的...换成...”“参考上图生成...”。
+- 如果用户想改图但没有发图或引用图 不要调用工具 先请用户发送或引用图片。
+- 如果用户只是讨论图片 询问建议 写提示词 改提示词 翻译提示词 分析图片风格 规划设计方案 询问参数或问能不能生成 不要调用工具 直接用文字回答。
+- 用户表达不明确时不要主动生成 先用文字确认是否需要现在出图。
 - 同一条用户消息最多调用一次工具 先生成一张图 除非用户后续继续要求修改或再生成 不要在同一轮对话里重复调用
 
 参数怎么传：
@@ -217,10 +219,11 @@ class GPTImage2Plugin(Star):
     ):
         """Generate or edit an image with a GPT image model and send it to the current chat.
 
-        Use this tool when the user asks to create, draw, generate, render, design, visualize,
-        or produce an image. Set use_reference_images=true when the user wants to edit,
+        Use this tool only when the user explicitly asks you to generate or edit an
+        image now. Set use_reference_images=true only when the user wants to edit,
         transform, combine, or follow images attached to the current message or quoted/replied
-        message. Do not use it for normal text-only answers.
+        message. Do not use it for normal text-only answers, prompt writing, design
+        advice, image discussion, parameter questions, or ambiguous requests.
 
         Call this tool at most once for one user message. The tool sends the finished image directly to the user. After the tool reports
         background-task status, respond in your persona and naturally let the user know
