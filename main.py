@@ -245,6 +245,13 @@ class GPTImage2Plugin(Star):
         if not prompt or not prompt.strip():
             return "缺少图片提示词，无法生成或修改图片。"
 
+        if not self._message_allows_image_tool(event, use_reference_images=use_reference_images):
+            logger.info(
+                "GPT Image tool call blocked because the source message has no explicit image intent: %s",
+                self._event_text(event)[:200],
+            )
+            return "这条消息不是明确的出图或改图请求 不要调用图片工具 请直接用文字回复用户"
+
         reference_paths: list[str] = []
         if use_reference_images:
             reference_paths = await self._collect_reference_image_paths(event)
@@ -669,6 +676,47 @@ class GPTImage2Plugin(Star):
             parts.append(hashlib.sha256(text.encode("utf-8")).hexdigest()[:16])
 
         return "|".join(dict.fromkeys(parts)) or "unknown-message"
+
+    def _message_allows_image_tool(self, event: AstrMessageEvent, *, use_reference_images: bool) -> bool:
+        text = self._event_text(event)
+        if not text:
+            return False
+
+        normalized = re.sub(r"\s+", "", text.lower())
+        if not normalized:
+            return False
+
+        prompt_only_patterns = [
+            r"(提示词|prompt).*(写|改|优化|润色|翻译|扩写|整理)",
+            r"(生成|写|改|优化|润色|翻译|扩写|整理).*(提示词|prompt)",
+            r"(怎么|如何|为什么|什么|啥|能不能|可以吗|参数|设置|教程|建议|方案|分析|评价).*(画|生成|生图|出图|改图|图片|图像)",
+        ]
+        if any(re.search(pattern, normalized) for pattern in prompt_only_patterns):
+            return False
+
+        generation_patterns = [
+            r"(画|绘制|生成|生图|出图|出一张|做一张|做张|做一个|做个|来一张|来张).*(图|图片|图像|画|海报|头像|壁纸|图标|logo|贴纸|表情|插画|漫画|照片|场景)",
+            r"(画|绘制)(一张|一个|个|只|幅|张).+",
+            r"(生成|做|设计|制作)(一张|一个|个|张).+",
+            r"(帮我|给我|替我).*(画|绘制|生成|生图|出图|做一张|做张|做一个|做个|来一张|来张)",
+            r"(设计|制作|做).*(一张|一个|个).*(图|图片|图像|海报|头像|壁纸|图标|logo|贴纸|表情|插画|漫画)",
+            r"^(画|绘制|生成|生图|出图|做一张|做张|做一个|做个|来一张|来张)",
+        ]
+        edit_patterns = [
+            r"(改图|修图|p图|重绘|扩图|抠图)",
+            r"(改|修|换|替换|去掉|删除|加上|添加|合成|参考|照着).*(这张|上图|图片|图里|图中|照片|背景|主体|人物|文字)",
+            r"(把|将).*(图|图片|照片|背景|主体|人物|文字).*(改|修|换|替换|去掉|删除|加上|添加|合成)",
+        ]
+
+        if use_reference_images:
+            return any(re.search(pattern, normalized) for pattern in edit_patterns + generation_patterns)
+        return any(re.search(pattern, normalized) for pattern in generation_patterns)
+
+    def _event_text(self, event: AstrMessageEvent) -> str:
+        try:
+            return str(getattr(event, "message_str", "") or event.get_message_str() or "").strip()
+        except Exception:
+            return str(getattr(event, "message_str", "") or "").strip()
 
     def _event_scope_key(self, event: AstrMessageEvent) -> str:
         parts: list[str] = []
