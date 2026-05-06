@@ -101,7 +101,7 @@ DEFAULT_TOOL_GUIDE = """
     PLUGIN_ID,
     "starmiaoa",
     "GPT Image 图片生成插件，支持所有 GPT Image 系列模型",
-    "1.1.2",
+    "1.1.3",
 )
 class GPTImage2Plugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
