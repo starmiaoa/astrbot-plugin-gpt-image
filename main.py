@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import hashlib
 import json
 import mimetypes
@@ -27,7 +28,6 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Image
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, StarTools, register
-from astrbot.core.provider.func_tool_manager import FunctionToolManager
 
 
 PLUGIN_ID = "astrbot_plugin_gpt_image_2"
@@ -138,9 +138,8 @@ class GPTImage2Plugin(Star):
             )
         )
         self._schedule_background_delivery(event, task, error_prefix="图片生成失败")
-        await event.send(event.plain_result(self._tool_submitted_message()))
         event.stop_event()
-        yield
+        yield event.plain_result(self._tool_submitted_message())
 
     @filter.command("改图")
     async def edit_command(self, event: AstrMessageEvent):
@@ -170,9 +169,8 @@ class GPTImage2Plugin(Star):
             )
         )
         self._schedule_background_delivery(event, task, error_prefix="图片修改失败")
-        await event.send(event.plain_result(self._tool_submitted_message()))
         event.stop_event()
-        yield
+        yield event.plain_result(self._tool_submitted_message())
 
     @filter.command("生图帮助")
     async def gptimage_help(self, event: AstrMessageEvent):
@@ -438,7 +436,10 @@ class GPTImage2Plugin(Star):
         b64_json = item.get("b64_json")
         if isinstance(b64_json, str) and b64_json.strip():
             raw_b64 = b64_json.split(",", 1)[-1] if "," in b64_json[:64] else b64_json
-            image_bytes = base64.b64decode(raw_b64)
+            try:
+                image_bytes = base64.b64decode(raw_b64)
+            except (binascii.Error, ValueError) as exc:
+                raise RuntimeError("图像接口返回的 b64_json 无法解码。") from exc
             file_path.write_bytes(image_bytes)
             return str(file_path), revised_prompt
 
@@ -1339,14 +1340,6 @@ class GPTImage2Plugin(Star):
             raise RuntimeError("OpenAI 官方接口没有启用。请在插件配置里开启 openai.enabled，或启用 2api。")
         if provider_mode == "2api" and not self._provider_enabled("2api"):
             raise RuntimeError("2api 接口没有启用。请在插件配置里开启 two_api.enabled，或启用 OpenAI 官方接口。")
-
-    def _remove_tool_from_request(self, req: ProviderRequest) -> None:
-        tool_set = req.func_tool
-        if isinstance(tool_set, FunctionToolManager):
-            req.func_tool = tool_set.get_full_tool_set()
-            tool_set = req.func_tool
-        if tool_set and hasattr(tool_set, "remove_tool"):
-            tool_set.remove_tool(TOOL_NAME)
 
     def _cleanup_old_images(self) -> None:
         ttl_hours = self._int_cfg("runtime", "cache_ttl_hours", 72)
