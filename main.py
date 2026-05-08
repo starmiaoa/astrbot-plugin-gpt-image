@@ -26,9 +26,8 @@ from astrbot.api import llm_tool, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Image
 from astrbot.api.provider import ProviderRequest
-from astrbot.api.star import Context, Star, register
+from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.core.provider.func_tool_manager import FunctionToolManager
-from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
 
 
 PLUGIN_ID = "astrbot_plugin_gpt_image_2"
@@ -107,7 +106,7 @@ class GPTImage2Plugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
         self.config = config or {}
-        self._data_dir = Path(get_astrbot_plugin_data_path()) / PLUGIN_ID
+        self._data_dir = Path(StarTools.get_data_dir())
         self._image_dir = self._data_dir / "images"
         self._image_dir.mkdir(parents=True, exist_ok=True)
 
