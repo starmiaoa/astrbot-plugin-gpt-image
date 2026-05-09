@@ -422,6 +422,10 @@ class GPTImage2Plugin(Star):
                     logger.debug("Failed to close GPT Image upload file", exc_info=True)
 
     async def _save_image_from_response(self, response: dict[str, Any]) -> tuple[str, str | None]:
+        normalized_response = self._extract_image_response(response)
+        if normalized_response:
+            response = normalized_response
+
         data = response.get("data")
         if not isinstance(data, list) or not data:
             raise RuntimeError("图像接口没有返回 data[0]。")
@@ -1025,7 +1029,7 @@ class GPTImage2Plugin(Star):
         if not text:
             return ""
         if text == "auto":
-            return "auto"
+            return ""
         match = re.fullmatch(r"(\d{1,2})\s*:\s*(\d{1,2})", text)
         if not match:
             return ""
@@ -1041,10 +1045,10 @@ class GPTImage2Plugin(Star):
     def _reference_image_aspect_ratio(self, image_path: str) -> str:
         size = self._image_dimensions(image_path)
         if not size:
-            return "auto"
+            return ""
         width, height = size
         if width <= 0 or height <= 0:
-            return "auto"
+            return ""
         return self._nearest_supported_aspect_ratio(width / height)
 
     def _nearest_supported_aspect_ratio(self, ratio: float) -> str:
@@ -1302,21 +1306,24 @@ class GPTImage2Plugin(Star):
 
             url = data.get("url") or data.get("image_url")
             if isinstance(url, str) and url.startswith(("http://", "https://")):
-                return {"data": [{"url": url}]}
+                return {"data": [{"url": url, "revised_prompt": data.get("revised_prompt")}]}
             b64_json = data.get("b64_json") or data.get("base64")
             if isinstance(b64_json, str) and b64_json.strip():
-                return {"data": [{"b64_json": b64_json}]}
+                return {"data": [{"b64_json": b64_json, "revised_prompt": data.get("revised_prompt")}]}
 
         if isinstance(data, list):
             image_items = []
             for item in data:
                 if isinstance(item, str) and item.startswith(("http://", "https://")):
                     image_items.append({"url": item})
-                elif isinstance(item, dict) and (item.get("url") or item.get("b64_json") or item.get("image_url")):
+                elif isinstance(item, dict) and (
+                    item.get("url") or item.get("b64_json") or item.get("image_url") or item.get("base64")
+                ):
                     image_items.append(
                         {
                             "url": item.get("url") or item.get("image_url"),
-                            "b64_json": item.get("b64_json"),
+                            "b64_json": item.get("b64_json") or item.get("base64"),
+                            "revised_prompt": item.get("revised_prompt"),
                         }
                     )
             if image_items:
