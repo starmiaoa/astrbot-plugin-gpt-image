@@ -157,7 +157,7 @@ DEFAULT_TOOL_GUIDE = """
     PLUGIN_ID,
     "starmiaoa",
     "GPT Image 图片生成插件，支持所有 GPT Image 系列模型",
-    "1.2.1",
+    "1.2.2",
 )
 class GPTImage2Plugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
@@ -1010,8 +1010,8 @@ class GPTImage2Plugin(Star):
             for prefix in (f"/{name}", name):
                 if text == prefix:
                     return ""
-                if text.startswith(prefix + " "):
-                    return text[len(prefix) :].strip()
+                if text.startswith(prefix):
+                    return text[len(prefix) :].lstrip()
         return text
 
     async def _collect_reference_image_paths(self, event: AstrMessageEvent) -> list[str]:
