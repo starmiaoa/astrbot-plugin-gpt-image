@@ -27,6 +27,7 @@ GPT Image 图片生成插件，支持所有 GPT Image 系列模型。
 - `image.resolution`：默认清晰度档位，支持 `auto`、`1k`、`2k`、`4k`。默认 `1k`，供应商支持时会生效，不支持时可能忽略。
 - `image.aspect_ratio`：默认比例。支持比例参数的供应商会按比例出图；OpenAI 官方会近似映射为方图、横图或竖图。改图没传比例时优先按第一张参考图比例。
 - `image.max_reference_images`：最多参考图数量，GPT 图像编辑接口最多 16 张。
+- `runtime.retry_times`：网络抖动重试次数。默认 `1`，只处理连接重置、超时、502/503/504/520-526 这类瞬时失败；业务错误和内容审核拒绝不会重试。
 
 `image.size`、`image.resolution` 和 `image.aspect_ratio` 是三个不同概念：`size` 是具体像素尺寸，`resolution` 是 1K/2K/4K 清晰度档位，`aspect_ratio` 是画面比例。命令里显式传 `--size`、`--ratio` 或 `--resolution` 时，显式参数优先。
 
@@ -68,7 +69,8 @@ GPT Image 图片生成插件，支持所有 GPT Image 系列模型。
 ## 开发说明
 
 - 配置只暴露一个 `api` 块。供应商类型由插件运行时自动判断：先按启发式或缓存选一套参数档案 (`standard` / `flexible`)，请求失败且像参数格式错误时再用另一套档案重试一次，成功后把档案按 `(base_url, model, operation)` 缓存到内存。
-- 重试只在上游明确报参数格式错误(例如 `unknown parameter`、`size must be one of`、`resolution not supported` 这些)时触发；401/403/429、内容审核拒绝这类错误不会再浪费一次额度去重试。
+- 参数格式重试只在上游明确报参数格式错误(例如 `unknown parameter`、`size must be one of`、`resolution not supported` 这些)时触发；401/403/429、内容审核拒绝这类错误不会再浪费一次额度去重试。
+- 网络抖动重试由 `runtime.retry_times` 控制，覆盖连接重置、握手/读取超时、502/503/504/520-526 等瞬时失败。图片生成是 POST 请求，重试次数不建议调太高，避免上游实际已收到任务时重复生成或重复扣费。
 - 旧 `openai` / `two_api` 配置块仍然在代码里作为 fallback 读取，且尊重老的 `enabled` 开关。但只要用户在新 `api` 块里改过 `base_url`/`model`/`timeout_seconds` 任一字段，就视为已经迁移到新块，旧块里残留的 Key 不会再被偷偷打到新地址上(避免迁移后旧 Key 被错送到新中转翻车)。
 - 多图编辑上传时重复使用 multipart 字段名 `image`，不要改成 `image[]`，否则严格兼容 OpenAI 的接口可能拒收。
 - `size`、`resolution`、`aspect_ratio` 的归一化逻辑在 `main.py` 里集中处理。改动前建议分别用 OpenAI 标准接口和 2api 类接口验证两套档案路径。
