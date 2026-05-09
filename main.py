@@ -1,8 +1,11 @@
 """AstrBot plugin for GPT image generation models.
 
-The provider selection in this file follows the way a model supplier exposes
-its service: OpenAI official/compatible Images API, or webpage reverse
-2api/ToAPIs endpoints that still accept OpenAI-compatible requests.
+The plugin exposes a single API config block. Internally it keeps two
+parameter profiles (``standard`` and ``flexible``) that map to OpenAI's
+strict Images API and the looser webpage-reverse / 2api / ToAPIs dialect.
+A profile is picked per request from cache or heuristics; on a parameter
+error from the upstream the request is retried once with the other profile,
+and the successful profile is cached per ``(base_url, model, operation)``.
 """
 
 from __future__ import annotations
@@ -69,6 +72,60 @@ OPENAI_SIZE_TO_RATIO = {
     "1024x1536": "2:3",
 }
 
+# Substrings (case-insensitive) that indicate the upstream rejected the
+# request because of a parameter format mismatch rather than auth, quota,
+# moderation, or transport issues. Used to decide whether it is worth
+# retrying with the other compat profile.
+#
+# IMPORTANT: keep these specific. Generic markers like ``invalid_request_error``
+# are deliberately excluded because OpenAI / compatible providers reuse that
+# error type for content-policy refusals and other 400s that should NOT be
+# retried with a different parameter dialect (it would waste quota and could
+# double-fire moderation hits on the same prompt).
+PARAM_ERROR_KEYWORDS = (
+    "size",
+    "aspect_ratio",
+    "aspect ratio",
+    "resolution",
+    "invalid_value",
+    "invalid value",
+    "unknown parameter",
+    "unrecognized",
+    "field required",
+    "must be one of",
+    "not supported",
+)
+
+# Defaults for the merged ``api`` config block. Used by ``_new_api_active`` to
+# tell whether the user has actually filled in the new block or is still on
+# the auto-populated schema defaults (in which case we should fall back to
+# the legacy ``openai`` / ``two_api`` blocks).
+DEFAULT_API_BASE_URL = "https://api.openai.com/v1"
+DEFAULT_API_MODEL = "gpt-image-2"
+DEFAULT_API_TIMEOUT = 180
+
+
+class ImageAPIError(RuntimeError):
+    """HTTP error returned from the image API.
+
+    Wraps the status, parsed message, and (truncated) raw body so the
+    caller can decide whether the failure is a parameter format issue
+    that warrants a retry with the other compat profile.
+    """
+
+    def __init__(self, status: int, message: str, body: str = "") -> None:
+        super().__init__(message or f"HTTP {status}")
+        self.status = status
+        self.message = message
+        self.body = body
+
+    def is_param_error(self) -> bool:
+        if self.status not in {400, 422}:
+            return False
+        haystack = f"{self.message}\n{self.body}".lower()
+        return any(keyword in haystack for keyword in PARAM_ERROR_KEYWORDS)
+
+
 DEFAULT_TOOL_GUIDE = """
 # GPT Image 画图工具使用说明
 
@@ -100,7 +157,7 @@ DEFAULT_TOOL_GUIDE = """
     PLUGIN_ID,
     "starmiaoa",
     "GPT Image 图片生成插件，支持所有 GPT Image 系列模型",
-    "1.1.3",
+    "1.2.1",
 )
 class GPTImage2Plugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
@@ -115,6 +172,10 @@ class GPTImage2Plugin(Star):
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._inflight_tool_tasks: dict[str, asyncio.Task[tuple[str, str | None]]] = {}
         self._inflight_tool_turns: dict[str, asyncio.Task[tuple[str, str | None]]] = {}
+        # In-memory cache of the compat profile that succeeded last time for a
+        # given (base_url, model, operation). Lets the next request skip the
+        # auto-detect heuristic and the failure-retry roundtrip.
+        self._compat_profile_cache: dict[tuple[str, str, str], str] = {}
 
     @filter.command("生图")
     async def generate_command(self, event: AstrMessageEvent):
@@ -300,7 +361,12 @@ class GPTImage2Plugin(Star):
             logger.error("GPT Image tool failed", exc_info=True)
             return f"图片生成失败：{self._friendly_error(exc)}"
 
-        return event.chain_result(self._build_result_chain(image_path, revised_prompt))
+        try:
+            await event.send(event.chain_result(self._build_result_chain(image_path, revised_prompt)))
+        except Exception as exc:
+            logger.error("GPT Image foreground delivery failed", exc_info=True)
+            return f"图片生成失败：{self._friendly_error(exc)}"
+        return None
 
     @filter.on_llm_request(priority=-9000)
     async def teach_llm_when_to_use_tool(
@@ -325,30 +391,104 @@ class GPTImage2Plugin(Star):
         reference_image_paths: list[str] | None = None,
     ) -> tuple[str, str | None]:
         self._ensure_enabled()
-        provider_mode = self._provider_mode()
-        api_key = self._api_key(provider_mode)
+        api_key = self._api_key()
         if not api_key:
-            provider_name = "2api/ToAPIs" if provider_mode == "2api" else "OpenAI 官方"
-            raise RuntimeError(f"{provider_name} 配置里没有填写 api_key，也没有设置可用的环境变量。")
+            raise RuntimeError(
+                "图像接口没有配置 API Key。请填写插件配置里的 api.api_key，"
+                "或设置环境变量 OPENAI_API_KEY / TWO_API_KEY。"
+            )
 
         references = self._prepare_reference_image_paths(reference_image_paths or [])
         final_prompt = self._build_prompt(prompt, style)
-        payload = self._build_payload(
-            final_prompt,
-            provider_mode=provider_mode,
+
+        operation = "edit" if references else "generation"
+        base_url = self._base_url()
+        model = self._model_name()
+        cache_key = (base_url, model, operation)
+
+        cached_profile = self._compat_profile_cache.get(cache_key)
+        heuristic_profile = self._auto_detect_profile(
+            operation=operation,
             size=size,
             aspect_ratio=aspect_ratio,
-            resolution=resolution,
-            quality=quality,
-            transparent_background=transparent_background,
             reference_image_paths=references,
         )
+        if self._request_has_strong_profile_hint(
+            operation=operation,
+            size=size,
+            aspect_ratio=aspect_ratio,
+            reference_image_paths=references,
+        ):
+            initial_profile = heuristic_profile
+        else:
+            initial_profile = cached_profile or heuristic_profile
+        other_profile = "flexible" if initial_profile == "standard" else "standard"
+        attempts = [initial_profile, other_profile]
+
+        errors: list[ImageAPIError] = []
+        response: dict[str, Any] | None = None
+        succeeded_profile: str | None = None
 
         async with self._semaphore:
-            if references:
-                response = await self._post_images_edit_api(api_key, payload, references, provider_mode=provider_mode)
-            else:
-                response = await self._post_images_generation_api(api_key, payload, provider_mode=provider_mode)
+            for idx, profile in enumerate(attempts):
+                payload = self._build_payload(
+                    final_prompt,
+                    profile=profile,
+                    size=size,
+                    aspect_ratio=aspect_ratio,
+                    resolution=resolution,
+                    quality=quality,
+                    transparent_background=transparent_background,
+                    reference_image_paths=references,
+                )
+                try:
+                    if references:
+                        response = await self._post_images_edit_api(api_key, payload, references)
+                    else:
+                        response = await self._post_images_generation_api(api_key, payload)
+                except ImageAPIError as exc:
+                    errors.append(exc)
+                    logger.warning(
+                        "GPT Image %s with profile=%s failed: HTTP %d %s",
+                        operation,
+                        profile,
+                        exc.status,
+                        str(exc.message)[:200],
+                    )
+                    if idx == 0 and exc.is_param_error():
+                        # Worth a single retry with the other parameter dialect.
+                        continue
+                    break
+                else:
+                    succeeded_profile = profile
+                    break
+
+            if response is None:
+                if not errors:
+                    raise RuntimeError("图像接口请求失败：未知错误。")
+                if len(errors) > 1:
+                    logger.error(
+                        "GPT Image both profiles failed; first profile error HTTP %d: %s",
+                        errors[0].status,
+                        str(errors[0].message)[:300],
+                    )
+                last = errors[-1]
+                raise RuntimeError(
+                    self._format_api_error(last.status, last.body or last.message)
+                ) from last
+
+            if succeeded_profile:
+                self._compat_profile_cache[cache_key] = succeeded_profile
+                if cached_profile and cached_profile != succeeded_profile:
+                    logger.info(
+                        "GPT Image profile updated for %s | %s | %s: %s -> %s",
+                        base_url,
+                        model,
+                        operation,
+                        cached_profile,
+                        succeeded_profile,
+                    )
+
             image_path, revised_prompt = await self._save_image_from_response(response)
             self._cleanup_old_images()
             return image_path, revised_prompt
@@ -357,18 +497,16 @@ class GPTImage2Plugin(Star):
         self,
         api_key: str,
         payload: dict[str, Any],
-        *,
-        provider_mode: str,
     ) -> dict[str, Any]:
-        url = self._images_generation_url(provider_mode)
+        url = self._images_generation_url()
         headers = self._api_headers(api_key, content_type="application/json")
 
-        timeout = aiohttp.ClientTimeout(total=max(10, self._timeout_seconds(provider_mode)))
+        timeout = aiohttp.ClientTimeout(total=max(10, self._timeout_seconds()))
         async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
             async with session.post(url, headers=headers, json=payload) as resp:
                 if resp.status >= 400:
                     text = await self._read_limited_response_text(resp)
-                    raise RuntimeError(self._format_api_error(resp.status, text))
+                    raise self._build_api_error(resp.status, text)
                 text = await resp.text()
                 try:
                     return json.loads(text)
@@ -380,15 +518,13 @@ class GPTImage2Plugin(Star):
         api_key: str,
         payload: dict[str, Any],
         image_paths: list[str],
-        *,
-        provider_mode: str,
     ) -> dict[str, Any]:
-        url = self._images_edit_url(provider_mode)
+        url = self._images_edit_url()
         headers = self._api_headers(api_key)
         form = aiohttp.FormData()
 
         for key, value in payload.items():
-            form.add_field(key, str(value))
+            form.add_field(key, self._multipart_field_value(value))
 
         opened_files = []
         try:
@@ -403,12 +539,12 @@ class GPTImage2Plugin(Star):
                     content_type=content_type,
                 )
 
-            timeout = aiohttp.ClientTimeout(total=max(10, self._timeout_seconds(provider_mode)))
+            timeout = aiohttp.ClientTimeout(total=max(10, self._timeout_seconds()))
             async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
                 async with session.post(url, headers=headers, data=form) as resp:
                     if resp.status >= 400:
                         text = await self._read_limited_response_text(resp)
-                        raise RuntimeError(self._format_api_error(resp.status, text))
+                        raise self._build_api_error(resp.status, text)
                     text = await resp.text()
                     try:
                         return json.loads(text)
@@ -446,24 +582,36 @@ class GPTImage2Plugin(Star):
                 image_bytes = base64.b64decode(raw_b64)
             except (binascii.Error, ValueError) as exc:
                 raise RuntimeError("图像接口返回的 b64_json 无法解码。") from exc
+            if not image_bytes:
+                raise RuntimeError("图像接口返回了空的 b64_json。")
+            actual_suffix = self._image_suffix_from_bytes(image_bytes)
+            if actual_suffix:
+                file_path = file_path.with_suffix(actual_suffix)
             file_path.write_bytes(image_bytes)
             return str(file_path), revised_prompt
 
         image_url = item.get("url")
         if isinstance(image_url, str) and image_url.startswith(("http://", "https://")):
-            await self._download_image(image_url, file_path)
+            file_path = await self._download_image(image_url, file_path)
             return str(file_path), revised_prompt
 
         raise RuntimeError("图像接口没有返回 b64_json 或 url。")
 
-    async def _download_image(self, url: str, file_path: Path) -> None:
-        timeout = aiohttp.ClientTimeout(total=max(10, self._timeout_seconds(self._provider_mode())))
+    async def _download_image(self, url: str, file_path: Path) -> Path:
+        timeout = aiohttp.ClientTimeout(total=max(10, self._timeout_seconds()))
         async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
             async with session.get(url) as resp:
                 if resp.status >= 400:
                     text = await self._read_limited_response_text(resp)
                     raise RuntimeError(f"下载图片失败：HTTP {resp.status} {text[:300]}")
-                file_path.write_bytes(await resp.read())
+                data = await resp.read()
+                if not data:
+                    raise RuntimeError("下载图片失败：响应内容为空。")
+                actual_suffix = self._image_suffix_from_bytes(data, resp.headers.get("Content-Type", ""))
+                if actual_suffix:
+                    file_path = file_path.with_suffix(actual_suffix)
+                file_path.write_bytes(data)
+                return file_path
 
     async def _read_limited_response_text(self, resp: aiohttp.ClientResponse, limit: int = 2048) -> str:
         raw = await resp.content.read(limit + 1)
@@ -472,6 +620,13 @@ class GPTImage2Plugin(Star):
             raw = raw[:limit]
         text = raw.decode(resp.charset or "utf-8", errors="replace")
         return f"{text}..." if truncated else text
+
+    def _multipart_field_value(self, value: Any) -> str:
+        if value is True:
+            return "true"
+        if value is False:
+            return "false"
+        return str(value)
 
     def _schedule_background_delivery(
         self,
@@ -514,7 +669,7 @@ class GPTImage2Plugin(Star):
         self,
         prompt: str,
         *,
-        provider_mode: str,
+        profile: str,
         size: str | None,
         aspect_ratio: str | None,
         resolution: str | None,
@@ -522,17 +677,18 @@ class GPTImage2Plugin(Star):
         transparent_background: bool,
         reference_image_paths: list[str],
     ) -> dict[str, Any]:
-        model = self._model_name(provider_mode)
+        model = self._model_name()
         payload: dict[str, Any] = {
             "model": model,
             "prompt": prompt,
             "n": 1,
         }
 
-        # Standard OpenAI endpoints prefer concrete pixel sizes. Webpage
-        # reverse/2api suppliers often accept aspect ratios through the size
-        # field, so this branch intentionally preserves ratios for that channel.
-        if provider_mode == "2api":
+        # ``standard`` keeps the OpenAI-strict size grammar (pixel sizes only,
+        # ratios mapped to one of three OpenAI-accepted dimensions). ``flexible``
+        # lets the size field carry an aspect ratio string the way most webpage
+        # reverse / 2api suppliers expect.
+        if profile == "flexible":
             normalized_size = self._normalize_compatible_size(
                 size,
                 aspect_ratio=aspect_ratio,
@@ -557,7 +713,7 @@ class GPTImage2Plugin(Star):
         )
         normalized_resolution = self._normalize_resolution(resolution)
         if normalized_resolution != "auto":
-            if provider_mode == "2api" and normalized_resolution == "4k" and normalized_ratio not in VALID_4K_ASPECT_RATIOS:
+            if profile == "flexible" and normalized_resolution == "4k" and normalized_ratio not in VALID_4K_ASPECT_RATIOS:
                 normalized_resolution = "2k"
             payload["resolution"] = normalized_resolution
 
@@ -678,48 +834,6 @@ class GPTImage2Plugin(Star):
 
         return "|".join(dict.fromkeys(parts)) or "unknown-message"
 
-    def _message_allows_image_tool(self, event: AstrMessageEvent, *, use_reference_images: bool) -> bool:
-        text = self._event_text(event)
-        if not text:
-            return False
-
-        normalized = re.sub(r"\s+", "", text.lower())
-        if not normalized:
-            return False
-
-        prompt_only_patterns = [
-            r"(提示词|prompt).*(写|改|优化|润色|翻译|扩写|整理)",
-            r"(生成|写|改|优化|润色|翻译|扩写|整理).*(提示词|prompt)",
-            r"(怎么|如何|为什么|什么|啥|能不能|可以吗|参数|设置|教程|建议|方案|分析|评价).*(画|生成|生图|出图|改图|图片|图像)",
-        ]
-        if any(re.search(pattern, normalized) for pattern in prompt_only_patterns):
-            return False
-
-        generation_patterns = [
-            r"(画|绘制|生成|生图|出图|出一张|做一张|做张|做一个|做个|来一张|来张).*(图|图片|图像|画|海报|头像|壁纸|图标|logo|贴纸|表情|插画|漫画|照片|场景)",
-            r"(画|绘制)(一张|一个|个|只|幅|张).+",
-            r"(生成|做|设计|制作)(一张|一个|个|张).+",
-            r"(帮我|给我|替我).*(画|绘制|生成|生图|出图|做一张|做张|做一个|做个|来一张|来张)",
-            r"(设计|制作|做).*(一张|一个|个).*(图|图片|图像|海报|头像|壁纸|图标|logo|贴纸|表情|插画|漫画)",
-            r"^(画|绘制|生成|生图|出图|做一张|做张|做一个|做个|来一张|来张)",
-        ]
-        edit_patterns = [
-            r"(改图|修图|p图|重绘|扩图|抠图)",
-            r"(改|修|换|替换|去掉|删除|加上|添加|合成|参考|照着).*(这张|上图|图片|图里|图中|照片|背景|主体|人物|文字)",
-            r"(把|将).*(图|图片|照片|背景|主体|人物|文字).*(改|修|换|替换|去掉|删除|加上|添加|合成)",
-        ]
-
-        if use_reference_images:
-            return any(re.search(pattern, normalized) for pattern in edit_patterns + generation_patterns)
-        return any(re.search(pattern, normalized) for pattern in generation_patterns)
-
-    def _event_text(self, event: AstrMessageEvent) -> str:
-        try:
-            return str(getattr(event, "message_str", "") or event.get_message_str() or "").strip()
-        except Exception:
-            logger.debug("Failed to read AstrBot message text", exc_info=True)
-            return str(getattr(event, "message_str", "") or "").strip()
-
     def _event_scope_key(self, event: AstrMessageEvent) -> str:
         parts: list[str] = []
         for name in ("unified_msg_origin", "session_id"):
@@ -746,6 +860,63 @@ class GPTImage2Plugin(Star):
                 parts.append(str(value))
 
         return "|".join(dict.fromkeys(parts)) or "global"
+
+    def _message_allows_image_tool(self, event: AstrMessageEvent, *, use_reference_images: bool) -> bool:
+        text = self._event_text(event)
+        if not text:
+            return False
+
+        normalized = re.sub(r"\s+", "", text.lower())
+        if not normalized:
+            return False
+
+        prompt_only_patterns = [
+            r"(提示词|prompt).*(写|改|优化|润色|翻译|扩写|整理)",
+            r"(生成|写|改|优化|润色|翻译|扩写|整理).*(提示词|prompt)",
+            r"(怎么|如何|为什么|什么|啥|能不能|可以吗|参数|设置|教程|建议|方案|分析|评价).*(画|生成|生图|出图|改图|图片|图像)",
+            r"(how|what|why|help|guide|tutorial|advice|suggest|analy[sz]e|review).*(draw|generate|create|edit|image|picture|photo|prompt)",
+            r"(prompt).*(write|improve|rewrite|translate|optimi[sz]e|polish)",
+            r"(write|improve|rewrite|translate|optimi[sz]e|polish).*(prompt)",
+        ]
+        if any(re.search(pattern, normalized) for pattern in prompt_only_patterns):
+            return False
+
+        generation_patterns = [
+            r"(画|绘制|生成|生图|出图|出一张|做一张|做张|做一个|做个|来一张|来张).*(图|图片|图像|画|海报|头像|壁纸|图标|logo|贴纸|表情|插画|漫画|照片|场景)",
+            r"(画|绘制)(一张|一个|个|只|幅|张).+",
+            r"(生成|做|设计|制作)(一张|一个|个|张).+",
+            r"(帮我|给我|替我).*(画|绘制|生成|生图|出图|做一张|做张|做一个|做个|来一张|来张)",
+            r"(设计|制作|做).*(一张|一个|个).*(图|图片|图像|海报|头像|壁纸|图标|logo|贴纸|表情|插画|漫画)",
+            r"^(画|绘制|生成|生图|出图|做一张|做张|做一个|做个|来一张|来张)",
+            r"(draw|generate|create|make|paint|design).*(image|picture|photo|poster|avatar|wallpaper|icon|logo|sticker|illustration|comic|scene)",
+            r"(image|picture|photo|poster|avatar|wallpaper|icon|logo|sticker|illustration).*(draw|generate|create|make|paint|design)",
+            r"(can|could|please|pls|wouldyou|canyou|couldyou|helpme).*(draw|paint).+",
+            r"(can|could|please|pls|wouldyou|canyou|couldyou|helpme).*(generate|create|make|design).*(image|picture|photo|poster|avatar|wallpaper|icon|logo|sticker|illustration|comic|scene)",
+            r"^(draw|paint)(a|an|the)?.+",
+            r"^(draw|generate|create|make|paint|design)(an?|the)?(image|picture|photo|poster|avatar|wallpaper|icon|logo|sticker|illustration|comic|scene)",
+            r"(画像|イラスト|写真|ポスター|アイコン|壁紙|ロゴ).*(描いて|生成|作成|作って|描く)",
+            r"(描いて|生成|作成|作って).*(画像|イラスト|写真|ポスター|アイコン|壁紙|ロゴ)",
+            r"(描いて|描く|生成して|作って|作成して)",
+        ]
+        edit_patterns = [
+            r"(改图|修图|p图|重绘|扩图|抠图)",
+            r"(改|修|换|替换|去掉|删除|加上|添加|合成|参考|照着).*(这张|上图|图片|图里|图中|照片|背景|主体|人物|文字)",
+            r"(把|将).*(图|图片|照片|背景|主体|人物|文字).*(改|修|换|替换|去掉|删除|加上|添加|合成)",
+            r"(edit|modify|change|replace|remove|delete|add|combine|merge|redraw|expand|cutout).*(this|the)?(image|picture|photo|background|subject|person|text)",
+            r"(this|the)?(image|picture|photo|background|subject|person|text).*(edit|modify|change|replace|remove|delete|add|combine|merge|redraw|expand|cutout)",
+            r"(画像|写真|背景|人物|文字).*(編集|修正|変更|置換|削除|追加|合成)",
+        ]
+
+        if use_reference_images:
+            return any(re.search(pattern, normalized) for pattern in edit_patterns + generation_patterns)
+        return any(re.search(pattern, normalized) for pattern in generation_patterns)
+
+    def _event_text(self, event: AstrMessageEvent) -> str:
+        try:
+            return str(getattr(event, "message_str", "") or event.get_message_str() or "").strip()
+        except Exception:
+            logger.debug("Failed to read AstrBot message text", exc_info=True)
+            return str(getattr(event, "message_str", "") or "").strip()
 
     def _parse_inline_options(self, text: str) -> tuple[dict[str, Any], str]:
         opts: dict[str, Any] = {
@@ -819,6 +990,9 @@ class GPTImage2Plugin(Star):
 
     def _assign_size_like_option(self, opts: dict[str, Any], value: str) -> None:
         normalized = (value or "").strip().lower()
+        if normalized == "auto":
+            opts["size"] = "auto"
+            return
         if re.fullmatch(r"\d+[x:：]\d+", normalized):
             if ":" in normalized or "：" in normalized:
                 opts["aspect_ratio"] = normalized.replace("：", ":")
@@ -831,7 +1005,7 @@ class GPTImage2Plugin(Star):
         opts["size"] = value
 
     def _extract_command_prompt(self, event: AstrMessageEvent, command_names: tuple[str, ...]) -> str:
-        text = str(event.message_str or event.get_message_str()).strip()
+        text = self._event_text(event)
         for name in command_names:
             for prefix in (f"/{name}", name):
                 if text == prefix:
@@ -959,7 +1133,7 @@ class GPTImage2Plugin(Star):
 
         ratio = self._normalize_aspect_ratio(
             aspect_ratio,
-            size=None,
+            size=size,
             reference_image_paths=reference_image_paths,
             prefer_reference_ratio=prefer_reference_ratio,
         )
@@ -973,7 +1147,7 @@ class GPTImage2Plugin(Star):
 
     def _normalize_pixel_size(self, size: str | None) -> str:
         value = (size or "").strip().lower()
-        if not value:
+        if not value or value == "auto":
             return ""
         value = value.replace("*", "x").replace(" ", "")
         if value in VALID_OPENAI_SIZES:
@@ -1106,7 +1280,7 @@ class GPTImage2Plugin(Star):
     def _normalize_resolution(self, resolution: str | None) -> str:
         value = (resolution or "").strip().lower()
         if not value:
-            value = self._str_cfg("image", "resolution", "auto").lower()
+            value = self._str_cfg("image", "resolution", "1k").lower()
         value = value.replace(" ", "")
         if value in {"1", "1k", "1024", "1024p"}:
             return "1k"
@@ -1206,9 +1380,8 @@ class GPTImage2Plugin(Star):
         value = self._str_cfg("image", "output_format", "png").lower()
         return value if value in VALID_OUTPUT_FORMATS else "png"
 
-    def _images_generation_url(self, provider_mode: str | None = None) -> str:
-        provider_mode = provider_mode or self._provider_mode()
-        base_url = self._base_url(provider_mode).rstrip("/")
+    def _images_generation_url(self) -> str:
+        base_url = self._base_url().rstrip("/")
         if base_url.endswith("/images/generations"):
             return base_url
         if base_url.endswith("/images/edits"):
@@ -1217,9 +1390,8 @@ class GPTImage2Plugin(Star):
             return f"{base_url}/images/generations"
         return f"{base_url}/v1/images/generations"
 
-    def _images_edit_url(self, provider_mode: str | None = None) -> str:
-        provider_mode = provider_mode or self._provider_mode()
-        base_url = self._base_url(provider_mode).rstrip("/")
+    def _images_edit_url(self) -> str:
+        base_url = self._base_url().rstrip("/")
         if base_url.endswith("/images/edits"):
             return base_url
         if base_url.endswith("/images/generations"):
@@ -1228,63 +1400,205 @@ class GPTImage2Plugin(Star):
             return f"{base_url}/images/edits"
         return f"{base_url}/v1/images/edits"
 
-    def _provider_mode(self) -> str:
-        # The two config groups are not primary/fallback. They represent the
-        # interface type provided by the model supplier.
-        openai_enabled = self._provider_enabled("openai")
-        two_api_enabled = self._provider_enabled("2api")
-        if two_api_enabled and not openai_enabled:
-            return "2api"
-        if openai_enabled:
-            return "openai"
-        if two_api_enabled:
-            return "2api"
+    def _new_api_active(self) -> bool:
+        """Whether the merged ``api`` config block is filled in by the user.
 
-        legacy_mode = self._str_cfg("api", "provider_mode", "auto").lower()
-        if legacy_mode in {"2api", "toapis", "toapi"}:
-            return "2api"
+        Schema defaults populate ``api.base_url`` / ``api.model`` /
+        ``api.timeout_seconds`` automatically, so we cannot rely solely on
+        them being present. We treat the new block as active when:
+
+        * the user has set ``api.api_key`` (most explicit signal); or
+        * any of ``base_url`` / ``model`` / ``timeout_seconds`` differs from
+          the schema defaults (the user has clearly customized the new
+          block even though they leave the key in an env var).
+
+        This avoids the bug where a legacy ``openai`` block silently wins
+        over a freshly customized ``api.base_url`` when the key only lives
+        in ``OPENAI_API_KEY`` / ``TWO_API_KEY``.
+        """
+        if self._str_cfg("api", "api_key", ""):
+            return True
+
+        section = self._section("api")
+        base_url = self._str_cfg("api", "base_url", "")
+        if base_url and base_url != DEFAULT_API_BASE_URL:
+            return True
+        model = self._str_cfg("api", "model", "")
+        if model and model != DEFAULT_API_MODEL:
+            return True
+        raw_timeout = section.get("timeout_seconds")
+        if raw_timeout is not None:
+            try:
+                if int(raw_timeout) != DEFAULT_API_TIMEOUT:
+                    return True
+            except (TypeError, ValueError):
+                pass
+        return False
+
+    def _legacy_preferred_section(self) -> str:
+        """Pick the legacy block the user was actively using.
+
+        Defaults match the previous schema (``openai.enabled=true``,
+        ``two_api.enabled=false``). When the user explicitly flipped to 2api,
+        we honor that.
+        """
+        two_api_enabled = self._bool_cfg("two_api", "enabled", False)
+        openai_enabled = self._bool_cfg("openai", "enabled", True)
+        if two_api_enabled and not openai_enabled:
+            return "two_api"
         return "openai"
 
-    def _provider_enabled(self, provider_mode: str) -> bool:
-        if provider_mode == "2api":
-            section = self._section("two_api")
-            if "enabled" in section:
-                return self._bool_cfg("two_api", "enabled", False)
-            return self._str_cfg("api", "provider_mode", "").lower() in {"2api", "toapis", "toapi"}
+    def _legacy_section_enabled(self, section: str) -> bool:
+        if section == "two_api":
+            return self._bool_cfg("two_api", "enabled", False)
+        return self._bool_cfg("openai", "enabled", True)
 
-        section = self._section("openai")
-        if "enabled" in section:
-            return self._bool_cfg("openai", "enabled", True)
-        legacy_mode = self._str_cfg("api", "provider_mode", "openai").lower()
-        return legacy_mode not in {"2api", "toapis", "toapi"}
+    def _legacy_lookup(self, key: str) -> str:
+        """Walk the legacy ``openai`` / ``two_api`` blocks for a string value.
 
-    def _model_name(self, provider_mode: str) -> str:
-        if provider_mode == "2api":
-            model_2api = self._str_cfg("two_api", "model", "") or self._str_cfg("api", "model_2api", "")
-            if model_2api:
-                return model_2api
-            configured_model = self._str_cfg("api", "model", "")
-            if configured_model and configured_model != "gpt-image-2":
-                return configured_model
-            return "gpt-image-2"
-        return self._str_cfg("openai", "model", "") or self._str_cfg("api", "model", "gpt-image-2") or "gpt-image-2"
+        Respects the legacy ``enabled`` toggles so a user who explicitly
+        disabled a block does not have its values silently picked up.
+        """
+        preferred = self._legacy_preferred_section()
+        order = [preferred] + [s for s in ("openai", "two_api") if s != preferred]
+        for section in order:
+            if not self._legacy_section_enabled(section):
+                continue
+            value = self._str_cfg(section, key, "")
+            if value:
+                return value
+        return ""
 
-    def _base_url(self, provider_mode: str) -> str:
-        if provider_mode == "2api":
-            return self._str_cfg("two_api", "base_url", "") or self._str_cfg("api", "base_url", "https://api.openai.com/v1") or "https://api.openai.com/v1"
-        return self._str_cfg("openai", "base_url", "") or self._str_cfg("api", "base_url", "https://api.openai.com/v1") or "https://api.openai.com/v1"
+    def _legacy_lookup_int(self, key: str) -> int | None:
+        preferred = self._legacy_preferred_section()
+        order = [preferred] + [s for s in ("openai", "two_api") if s != preferred]
+        for section in order:
+            if not self._legacy_section_enabled(section):
+                continue
+            raw = self._section(section).get(key)
+            if raw is None:
+                continue
+            try:
+                return int(raw)
+            except (TypeError, ValueError):
+                continue
+        return None
 
-    def _timeout_seconds(self, provider_mode: str) -> int:
-        if provider_mode == "2api":
-            return self._int_cfg("two_api", "timeout_seconds", self._int_cfg("api", "timeout_seconds", 180))
-        return self._int_cfg("openai", "timeout_seconds", self._int_cfg("api", "timeout_seconds", 180))
+    def _model_name(self) -> str:
+        if self._new_api_active():
+            return self._str_cfg("api", "model", DEFAULT_API_MODEL) or DEFAULT_API_MODEL
+        legacy = self._legacy_lookup("model")
+        if legacy:
+            return legacy
+        # Super-old config block (pre openai/two_api split) reused the same
+        # ``api`` section name as the new merged config.
+        return self._str_cfg("api", "model", DEFAULT_API_MODEL) or DEFAULT_API_MODEL
+
+    def _base_url(self) -> str:
+        if self._new_api_active():
+            return self._str_cfg("api", "base_url", DEFAULT_API_BASE_URL) or DEFAULT_API_BASE_URL
+        legacy = self._legacy_lookup("base_url")
+        if legacy:
+            return legacy
+        return self._str_cfg("api", "base_url", DEFAULT_API_BASE_URL) or DEFAULT_API_BASE_URL
+
+    def _timeout_seconds(self) -> int:
+        if self._new_api_active():
+            return self._int_cfg("api", "timeout_seconds", DEFAULT_API_TIMEOUT)
+        legacy = self._legacy_lookup_int("timeout_seconds")
+        if legacy is not None:
+            return legacy
+        return self._int_cfg("api", "timeout_seconds", DEFAULT_API_TIMEOUT)
+
+    def _auto_detect_profile(
+        self,
+        *,
+        operation: str,
+        size: str | None,
+        aspect_ratio: str | None,
+        reference_image_paths: list[str] | None,
+    ) -> str:
+        """Pick an initial compat profile when the cache misses.
+
+        The returned value is only a first guess; if the upstream rejects
+        the request with a parameter-format error the caller will retry once
+        with the other profile.
+        """
+        # An explicit pixel size unambiguously speaks the strict OpenAI
+        # dialect, so try ``standard`` first.
+        if self._normalize_pixel_size(size):
+            return "standard"
+
+        # OpenAI strict can only express 1:1, 3:2, and 2:3 cleanly via its
+        # three accepted pixel sizes. Any other ratio (16:9, 21:9, ...) is
+        # better expressed by keeping the ratio in ``size`` (flexible). The
+        # retry mechanism still falls back to standard if flexible fails.
+        explicit_ratio = self._parse_aspect_ratio(aspect_ratio) or self._parse_aspect_ratio(size)
+        if explicit_ratio and explicit_ratio not in {"1:1", "3:2", "2:3"}:
+            return "flexible"
+
+        # Image edits with reference images and no explicit ratio: flexible
+        # can keep the original ratio without rounding to one of three sizes.
+        if operation == "edit" and reference_image_paths:
+            return "flexible"
+
+        return "standard"
+
+    def _request_has_strong_profile_hint(
+        self,
+        *,
+        operation: str,
+        size: str | None,
+        aspect_ratio: str | None,
+        reference_image_paths: list[str] | None,
+    ) -> bool:
+        """Whether this request should override the cached compat profile.
+
+        Cache is useful for ambiguous defaults, but an explicit pixel size,
+        a wide/tall ratio that OpenAI strict cannot represent exactly, or an
+        edit request that should follow the reference image is a stronger
+        signal than whatever succeeded on an earlier request.
+        """
+        if self._normalize_pixel_size(size):
+            return True
+        explicit_ratio = self._parse_aspect_ratio(aspect_ratio) or self._parse_aspect_ratio(size)
+        if explicit_ratio and explicit_ratio not in {"1:1", "3:2", "2:3"}:
+            return True
+        return operation == "edit" and bool(reference_image_paths)
+
+    def _build_api_error(self, status: int, body: str) -> ImageAPIError:
+        try:
+            data = json.loads(body)
+            error = data.get("error", data) if isinstance(data, dict) else data
+            if isinstance(error, dict):
+                message = error.get("message") or error.get("code") or str(error)
+            else:
+                message = str(error)
+        except (json.JSONDecodeError, AttributeError, TypeError):
+            message = body
+        return ImageAPIError(status, str(message)[:600], body)
 
     def _extract_image_response(self, data: Any) -> dict[str, Any] | None:
         if isinstance(data, dict):
             payload_data = data.get("data")
             if isinstance(payload_data, list) and payload_data:
-                if any(isinstance(item, dict) and (item.get("b64_json") or item.get("url")) for item in payload_data):
-                    return {"data": payload_data}
+                # Normalize alias keys (``image_url`` / ``base64``) used by
+                # webpage-reverse / 2api-style providers so the saver only
+                # has to look at ``url`` / ``b64_json``.
+                normalized_items: list[dict[str, Any]] = []
+                for item in payload_data:
+                    if not isinstance(item, dict):
+                        continue
+                    url = self._normalize_response_url(item.get("url") or item.get("image_url"))
+                    b64 = item.get("b64_json") or item.get("base64")
+                    if url or b64:
+                        normalized_items.append({
+                            "url": url,
+                            "b64_json": b64,
+                            "revised_prompt": item.get("revised_prompt"),
+                        })
+                if normalized_items:
+                    return {"data": normalized_items}
 
             nested = data.get("result") or data.get("output")
             if nested is not None:
@@ -1304,8 +1618,8 @@ class GPTImage2Plugin(Star):
                 if nested_response:
                     return nested_response
 
-            url = data.get("url") or data.get("image_url")
-            if isinstance(url, str) and url.startswith(("http://", "https://")):
+            url = self._normalize_response_url(data.get("url") or data.get("image_url"))
+            if url:
                 return {"data": [{"url": url, "revised_prompt": data.get("revised_prompt")}]}
             b64_json = data.get("b64_json") or data.get("base64")
             if isinstance(b64_json, str) and b64_json.strip():
@@ -1319,17 +1633,37 @@ class GPTImage2Plugin(Star):
                 elif isinstance(item, dict) and (
                     item.get("url") or item.get("b64_json") or item.get("image_url") or item.get("base64")
                 ):
-                    image_items.append(
-                        {
-                            "url": item.get("url") or item.get("image_url"),
-                            "b64_json": item.get("b64_json") or item.get("base64"),
-                            "revised_prompt": item.get("revised_prompt"),
-                        }
-                    )
+                    url = self._normalize_response_url(item.get("url") or item.get("image_url"))
+                    b64 = item.get("b64_json") or item.get("base64")
+                    if url or b64:
+                        image_items.append(
+                            {
+                                "url": url,
+                                "b64_json": b64,
+                                "revised_prompt": item.get("revised_prompt"),
+                            }
+                        )
             if image_items:
                 return {"data": image_items}
 
         return None
+
+    def _normalize_response_url(self, value: Any) -> str:
+        if isinstance(value, dict):
+            value = value.get("url")
+        if isinstance(value, str) and value.startswith(("http://", "https://")):
+            return value
+        return ""
+
+    def _image_suffix_from_bytes(self, data: bytes, content_type: str = "") -> str:
+        content_type = (content_type or "").split(";", 1)[0].strip().lower()
+        if content_type == "image/png" or data.startswith(b"\x89PNG\r\n\x1a\n"):
+            return ".png"
+        if content_type in {"image/jpeg", "image/jpg"} or data.startswith(b"\xff\xd8"):
+            return ".jpg"
+        if content_type == "image/webp" or (data[:4] == b"RIFF" and data[8:12] == b"WEBP"):
+            return ".webp"
+        return ""
 
     def _api_headers(self, api_key: str, *, content_type: str | None = None) -> dict[str, str]:
         headers = {"Authorization": f"Bearer {api_key}"}
@@ -1344,26 +1678,41 @@ class GPTImage2Plugin(Star):
             headers["OpenAI-Project"] = project
         return headers
 
-    def _api_key(self, provider_mode: str) -> str:
-        if provider_mode == "2api":
-            return (
-                self._str_cfg("two_api", "api_key", "")
-                or self._str_cfg("api", "api_key", "")
-                or os.environ.get("TWO_API_KEY", "")
-                or os.environ.get("OPENAI_API_KEY", "")
-            )
-        return (
-            self._str_cfg("openai", "api_key", "")
-            or self._str_cfg("api", "api_key", "")
-            or os.environ.get("OPENAI_API_KEY", "")
-        )
+    def _api_key(self) -> str:
+        # New unified ``api`` block first. The same section name was used by
+        # the very old pre-split config, so super-old users keep working too.
+        new_key = self._str_cfg("api", "api_key", "")
+        if new_key:
+            return new_key
+
+        # Legacy fallback only applies when the user is still on the old
+        # blocks. Once they have customized the new ``api`` block (e.g. a
+        # custom ``base_url``) and intentionally left ``api.api_key`` empty
+        # to use an environment variable, a stale leftover key in the old
+        # ``openai`` / ``two_api`` block must NOT silently be sent to the
+        # new endpoint. ``_new_api_active`` already encapsulates this check.
+        if not self._new_api_active():
+            legacy_key = self._legacy_lookup("api_key")
+            if legacy_key:
+                return legacy_key
+
+        # Last resort: environment variables. Order depends on which legacy
+        # section the user was on so old 2api-mode users keep getting
+        # ``TWO_API_KEY`` first when both vars happen to be set.
+        if self._legacy_preferred_section() == "two_api":
+            return os.environ.get("TWO_API_KEY", "") or os.environ.get("OPENAI_API_KEY", "")
+        return os.environ.get("OPENAI_API_KEY", "") or os.environ.get("TWO_API_KEY", "")
 
     def _ensure_enabled(self) -> None:
-        provider_mode = self._provider_mode()
-        if provider_mode == "openai" and not self._provider_enabled("openai"):
-            raise RuntimeError("OpenAI 官方接口没有启用。请在插件配置里开启 openai.enabled，或启用 2api。")
-        if provider_mode == "2api" and not self._provider_enabled("2api"):
-            raise RuntimeError("2api 接口没有启用。请在插件配置里开启 two_api.enabled，或启用 OpenAI 官方接口。")
+        # ``_api_key`` already walks the new ``api`` block, the legacy
+        # ``openai`` / ``two_api`` blocks (honoring their ``enabled`` flags),
+        # and the environment variables. An empty result means nothing usable
+        # is configured anywhere.
+        if not self._api_key():
+            raise RuntimeError(
+                "图像接口没有配置 API Key。"
+                "请在插件配置里填写 api.api_key，或设置环境变量 OPENAI_API_KEY / TWO_API_KEY。"
+            )
 
     def _cleanup_old_images(self) -> None:
         ttl_hours = self._int_cfg("runtime", "cache_ttl_hours", 72)

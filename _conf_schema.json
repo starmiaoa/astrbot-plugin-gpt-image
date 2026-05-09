@@ -1,75 +1,32 @@
 {
-  "openai": {
-    "description": "OpenAI 官方 / 标准兼容接口",
+  "api": {
+    "description": "API 接入设置",
     "type": "object",
-    "hint": "模型供应商如果提供 OpenAI 官方接口或标准 OpenAI-compatible Images API，就打开这里；如果提供的是网页逆向/2api/ToAPIs 渠道，就使用下面的 2api 配置。",
+    "hint": "兼容 OpenAI 官方 Images API、标准 OpenAI-compatible 接口，以及网页逆向/2api/ToAPIs 渠道。不确定供应商类型也可以直接填写，插件会自动选择合适的参数格式并在参数错误时切换重试。",
     "items": {
-      "enabled": {
-        "description": "启用 OpenAI 官方 / 标准兼容接口",
-        "type": "bool",
-        "default": true,
-        "hint": "开启后使用这一组 base_url、api_key 和模型名。"
-      },
       "api_key": {
-        "description": "OpenAI API Key",
+        "description": "API Key",
         "type": "string",
         "default": "",
-        "hint": "OpenAI 或兼容站 API Key。留空时读取环境变量 OPENAI_API_KEY。"
+        "hint": "供应商提供的 API Key。留空时按 OPENAI_API_KEY、TWO_API_KEY 环境变量回退读取。"
       },
       "base_url": {
-        "description": "OpenAI Base URL",
+        "description": "Base URL",
         "type": "string",
         "default": "https://api.openai.com/v1",
-        "hint": "填到 /v1 即可，例如 https://api.openai.com/v1；插件会自动补 /images/generations 或 /images/edits。"
+        "hint": "填到 /v1 即可，例如 https://api.openai.com/v1。插件会自动补 /images/generations 或 /images/edits。"
       },
       "model": {
-        "description": "OpenAI 模型名",
+        "description": "模型名",
         "type": "string",
         "default": "gpt-image-2",
-        "hint": "默认 gpt-image-2；兼容站按实际模型名填写。"
+        "hint": "按你的供应商要求填写，例如 gpt-image-2、gpt-image-2-all、gpt-image-1.5-official。"
       },
       "timeout_seconds": {
         "description": "请求超时秒数",
         "type": "int",
         "default": 180,
         "hint": "图像生成可能较慢，建议 120-300 秒。"
-      }
-    }
-  },
-  "two_api": {
-    "description": "2api / ToAPIs 网页逆向渠道",
-    "type": "object",
-    "hint": "模型供应商如果提供的是网页逆向/2api/ToAPIs 渠道，就打开这里；如果提供的是 OpenAI 官方接口或标准 OpenAI 兼容接口，就使用上面的 OpenAI 官方 / 标准兼容接口。",
-    "items": {
-      "enabled": {
-        "description": "启用网页逆向渠道",
-        "type": "bool",
-        "default": false,
-        "hint": "开启后使用这一组 base_url、api_key 和模型名，适合网页逆向/2api/ToAPIs 供应商。"
-      },
-      "api_key": {
-        "description": "网页逆向渠道 API Key",
-        "type": "string",
-        "default": "",
-        "hint": "网页逆向/2api/ToAPIs 渠道的 API Key。留空时读取 TWO_API_KEY，再回退到 OPENAI_API_KEY。"
-      },
-      "base_url": {
-        "description": "2api Base URL",
-        "type": "string",
-        "default": "",
-        "hint": "填到 /v1 即可；如果只填根地址，插件也会自动补 /v1/images/generations。"
-      },
-      "model": {
-        "description": "2api 模型名",
-        "type": "string",
-        "default": "gpt-image-2",
-        "hint": "不同 2api 渠道模型名可能不同，例如 gpt-image-2、gpt-image-2-all、gpt-image-1.5-official；按你的渠道要求填写。"
-      },
-      "timeout_seconds": {
-        "description": "任务超时秒数",
-        "type": "int",
-        "default": 180,
-        "hint": "图像生成可能较慢，建议 120-300 秒；部分供应商可设更高。"
       }
     }
   },
