@@ -106,7 +106,7 @@ class GPTImage2Plugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
         self.config = config or {}
-        self._data_dir = Path(StarTools.get_data_dir())
+        self._data_dir = StarTools.get_data_dir()
         self._image_dir = self._data_dir / "images"
         self._image_dir.mkdir(parents=True, exist_ok=True)
 
@@ -366,9 +366,10 @@ class GPTImage2Plugin(Star):
         timeout = aiohttp.ClientTimeout(total=max(10, self._timeout_seconds(provider_mode)))
         async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
             async with session.post(url, headers=headers, json=payload) as resp:
-                text = await resp.text()
                 if resp.status >= 400:
+                    text = await self._read_limited_response_text(resp)
                     raise RuntimeError(self._format_api_error(resp.status, text))
+                text = await resp.text()
                 try:
                     return json.loads(text)
                 except json.JSONDecodeError as exc:
@@ -405,9 +406,10 @@ class GPTImage2Plugin(Star):
             timeout = aiohttp.ClientTimeout(total=max(10, self._timeout_seconds(provider_mode)))
             async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
                 async with session.post(url, headers=headers, data=form) as resp:
-                    text = await resp.text()
                     if resp.status >= 400:
+                        text = await self._read_limited_response_text(resp)
                         raise RuntimeError(self._format_api_error(resp.status, text))
+                    text = await resp.text()
                     try:
                         return json.loads(text)
                     except json.JSONDecodeError as exc:
@@ -417,7 +419,7 @@ class GPTImage2Plugin(Star):
                 try:
                     file_obj.close()
                 except Exception:
-                    pass
+                    logger.debug("Failed to close GPT Image upload file", exc_info=True)
 
     async def _save_image_from_response(self, response: dict[str, Any]) -> tuple[str, str | None]:
         data = response.get("data")
@@ -455,9 +457,17 @@ class GPTImage2Plugin(Star):
         async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
             async with session.get(url) as resp:
                 if resp.status >= 400:
-                    text = await resp.text()
+                    text = await self._read_limited_response_text(resp)
                     raise RuntimeError(f"下载图片失败：HTTP {resp.status} {text[:300]}")
                 file_path.write_bytes(await resp.read())
+
+    async def _read_limited_response_text(self, resp: aiohttp.ClientResponse, limit: int = 2048) -> str:
+        raw = await resp.content.read(limit + 1)
+        truncated = len(raw) > limit
+        if truncated:
+            raw = raw[:limit]
+        text = raw.decode(resp.charset or "utf-8", errors="replace")
+        return f"{text}..." if truncated else text
 
     def _schedule_background_delivery(
         self,
@@ -648,6 +658,7 @@ class GPTImage2Plugin(Star):
             try:
                 value = method()
             except Exception:
+                logger.debug("Failed to read AstrBot message id", exc_info=True)
                 continue
             if value:
                 parts.append(str(value))
@@ -656,6 +667,7 @@ class GPTImage2Plugin(Star):
         try:
             text = str(getattr(event, "message_str", "") or event.get_message_str() or "")
         except Exception:
+            logger.debug("Failed to read AstrBot message text for image tool key", exc_info=True)
             text = str(getattr(event, "message_str", "") or "")
         if text:
             parts.append(hashlib.sha256(text.encode("utf-8")).hexdigest()[:16])
@@ -701,6 +713,7 @@ class GPTImage2Plugin(Star):
         try:
             return str(getattr(event, "message_str", "") or event.get_message_str() or "").strip()
         except Exception:
+            logger.debug("Failed to read AstrBot message text", exc_info=True)
             return str(getattr(event, "message_str", "") or "").strip()
 
     def _event_scope_key(self, event: AstrMessageEvent) -> str:
@@ -723,6 +736,7 @@ class GPTImage2Plugin(Star):
             try:
                 value = method()
             except Exception:
+                logger.debug("Failed to read AstrBot event scope", exc_info=True)
                 continue
             if value:
                 parts.append(str(value))
@@ -871,6 +885,7 @@ class GPTImage2Plugin(Star):
         try:
             message_chain = event.get_messages()
         except Exception:
+            logger.debug("Failed to read AstrBot message chain", exc_info=True)
             message_chain = getattr(getattr(event, "message_obj", None), "message", [])
 
         await walk(message_chain)
@@ -899,7 +914,8 @@ class GPTImage2Plugin(Star):
         try:
             with open(image_path, "rb") as file_obj:
                 header = file_obj.read(16)
-        except Exception:
+        except OSError:
+            logger.debug("Failed to read image header for content type detection", exc_info=True)
             header = b""
 
         if header.startswith(b"\x89PNG\r\n\x1a\n"):
@@ -1102,13 +1118,14 @@ class GPTImage2Plugin(Star):
 
             with PILImage.open(image_path) as image:
                 return image.size
-        except Exception:
-            pass
+        except (ImportError, OSError, ValueError):
+            logger.debug("Failed to read image dimensions with Pillow", exc_info=True)
 
         try:
             with open(image_path, "rb") as file_obj:
                 data = file_obj.read(256 * 1024)
-        except Exception:
+        except OSError:
+            logger.debug("Failed to read image header for dimension detection", exc_info=True)
             return None
 
         if data.startswith(b"\x89PNG\r\n\x1a\n") and len(data) >= 24:
@@ -1373,7 +1390,7 @@ class GPTImage2Plugin(Star):
                 message = error.get("message") or error.get("code") or str(error)
             else:
                 message = str(error)
-        except Exception:
+        except (json.JSONDecodeError, AttributeError, TypeError):
             message = text
         return f"图像接口请求失败：HTTP {status} {message[:600]}"
 
