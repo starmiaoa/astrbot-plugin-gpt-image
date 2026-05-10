@@ -122,6 +122,28 @@ DEFAULT_API_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_API_MODEL = "gpt-image-2"
 DEFAULT_API_TIMEOUT = 180
 
+# aiohttp's default User-Agent looks like ``Python/3.x aiohttp/3.y``. Some
+# middlemen place broad Cloudflare rules in front of API endpoints that block
+# that generic UA before the request reaches the model server. Identify this
+# plugin as a non-browser API client by default, while still allowing users to
+# override the header with ``api.user_agent`` for stricter deployments.
+DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (compatible; AstrBotGPTImagePlugin/1.0; "
+    "+https://github.com/starmiaoa/astrbot-plugin-gpt-image)"
+)
+
+# Pattern that identifies Cloudflare anti-bot / browser-challenge / managed
+# challenge HTML responses (typically returned with HTTP 403 and a ``cf-ray``
+# header). Used to surface a clearer error than raw HTML to the user.
+#
+# CF Ray IDs are exactly 16 hex chars, optionally followed by an upper-case
+# datacenter code like ``-LAX``. Anchor the search to ``cf-ray`` / ``Ray ID`` so
+# we do not accidentally report an unrelated asset hash from the challenge page.
+_CF_RAY_PATTERN = re.compile(
+    r"(?:cf[-_ ]?ray|ray\s+id)[^0-9a-f]{0,120}([0-9a-f]{16}(?:-[A-Z]{2,4})?)",
+    re.IGNORECASE,
+)
+
 
 class ImageAPIError(RuntimeError):
     """HTTP error returned from the image API.
@@ -192,7 +214,7 @@ DEFAULT_TOOL_GUIDE = """
     PLUGIN_ID,
     "starmiaoa",
     "GPT Image 图片生成插件，支持所有 GPT Image 系列模型",
-    "1.2.6",
+    "1.2.7",
 )
 class GPTImage2Plugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
@@ -566,7 +588,7 @@ class GPTImage2Plugin(Star):
                         reason=self._friendly_error(exc),
                     )
                     continue
-                raise RuntimeError(f"图像接口请求失败：网络连接失败：{self._friendly_error(exc)}") from exc
+                raise RuntimeError(self._network_failure_message(exc, "图像接口请求失败")) from exc
 
         raise RuntimeError("图像接口请求失败：网络重试后仍未返回结果。")
 
@@ -626,7 +648,7 @@ class GPTImage2Plugin(Star):
                             reason=self._friendly_error(exc),
                         )
                         continue
-                    raise RuntimeError(f"图像编辑接口请求失败：网络连接失败：{self._friendly_error(exc)}") from exc
+                    raise RuntimeError(self._network_failure_message(exc, "图像编辑接口请求失败")) from exc
             finally:
                 for file_obj in opened_files:
                     try:
@@ -679,11 +701,12 @@ class GPTImage2Plugin(Star):
     async def _download_image(self, url: str, file_path: Path) -> Path:
         timeout = aiohttp.ClientTimeout(total=max(10, self._timeout_seconds()))
         retry_times = self._network_retry_times()
+        headers = {"User-Agent": self._user_agent()}
 
         for attempt in range(retry_times + 1):
             try:
                 async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
-                    async with session.get(url) as resp:
+                    async with session.get(url, headers=headers) as resp:
                         if resp.status in TRANSIENT_HTTP_STATUSES and attempt < retry_times:
                             text = await self._read_limited_response_text(resp)
                             await self._sleep_before_network_retry(
@@ -694,6 +717,9 @@ class GPTImage2Plugin(Star):
                             continue
                         if resp.status >= 400:
                             text = await self._read_limited_response_text(resp)
+                            cf_message = self._cf_challenge_message(resp.status, text)
+                            if cf_message:
+                                raise RuntimeError(cf_message)
                             raise RuntimeError(f"下载图片失败：HTTP {resp.status} {text[:300]}")
                         data = await resp.read()
                         if not data:
@@ -711,7 +737,7 @@ class GPTImage2Plugin(Star):
                         reason=self._friendly_error(exc),
                     )
                     continue
-                raise RuntimeError(f"下载图片失败：网络连接失败：{self._friendly_error(exc)}") from exc
+                raise RuntimeError(self._network_failure_message(exc, "下载图片失败")) from exc
 
         raise RuntimeError("下载图片失败：网络重试后仍未返回结果。")
 
@@ -1786,7 +1812,10 @@ class GPTImage2Plugin(Star):
         return ""
 
     def _api_headers(self, api_key: str, *, content_type: str | None = None) -> dict[str, str]:
-        headers = {"Authorization": f"Bearer {api_key}"}
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "User-Agent": self._user_agent(),
+        }
         if content_type:
             headers["Content-Type"] = content_type
 
@@ -1797,6 +1826,12 @@ class GPTImage2Plugin(Star):
         if project:
             headers["OpenAI-Project"] = project
         return headers
+
+    def _user_agent(self) -> str:
+        # Allow per-deployment override for middlemen that expect a specific
+        # UA. Empty (the default) falls back to ``DEFAULT_USER_AGENT``.
+        configured = self._str_cfg("api", "user_agent", "").strip()
+        return configured or DEFAULT_USER_AGENT
 
     def _api_key(self) -> str:
         # New unified ``api`` block first. The same section name was used by
@@ -1859,6 +1894,9 @@ class GPTImage2Plugin(Star):
             logger.warning("Failed to clean old GPT Image cache files", exc_info=True)
 
     def _format_api_error(self, status: int, text: str) -> str:
+        cf_message = self._cf_challenge_message(status, text)
+        if cf_message:
+            return cf_message
         try:
             data = json.loads(text)
             error = data.get("error", data)
@@ -1870,9 +1908,59 @@ class GPTImage2Plugin(Star):
             message = text
         return f"图像接口请求失败：HTTP {status} {message[:600]}"
 
+    def _cf_challenge_message(self, status: int, text: str) -> str | None:
+        # Cloudflare's anti-bot/managed-challenge pages are returned as HTML
+        # with a ``cf-ray`` marker. Surface them as a clear, actionable error
+        # instead of dumping raw HTML to the user.
+        if status not in {403, 503} or not text:
+            return None
+        sample = text[:4000]
+        lowered = sample.lower()
+        if (
+            "cf-ray" not in lowered
+            and "cf_ray" not in lowered
+            and "ray id" not in lowered
+            and "cloudflare" not in lowered
+        ):
+            return None
+        if not any(
+            marker in lowered
+            for marker in (
+                "<html",
+                "<!doctype html",
+                "challenge",
+                "just a moment",
+                "attention required",
+                "安全验证",
+                "验证页",
+                "cf-ray",
+                "cf_ray",
+            )
+        ):
+            return None
+        ray_match = _CF_RAY_PATTERN.search(sample)
+        ray_part = f"，cf-ray={ray_match.group(1)}" if ray_match else ""
+        return (
+            f"图像接口被 Cloudflare 拦截 (HTTP {status}{ray_part})。"
+            "上游中转启用了 anti-bot 防护：可在插件配置 api.user_agent 里换一个 UA，"
+            "或联系中转方放行你的出口 IP。"
+        )
+
     def _friendly_error(self, exc: Exception) -> str:
         text = str(exc).strip()
         return text if text else exc.__class__.__name__
+
+    def _network_failure_message(self, exc: BaseException, action: str) -> str:
+        # Timeout-specific message: bare ``TimeoutError`` tells the user nothing
+        # actionable. Surface the actual configured timeout so they know which
+        # knob to turn.
+        if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+            return (
+                f"{action}：等待上游响应 {self._timeout_seconds()} 秒后超时。"
+                "图像生成本身较慢，可在配置里调高 api.timeout_seconds（建议 180-300），"
+                "或检查中转/网络是否可达。"
+            )
+        return f"{action}：网络连接失败：{self._friendly_error(exc)}"
 
     def _section(self, section: str) -> dict[str, Any]:
         value = self.config.get(section, {}) if isinstance(self.config, dict) else {}

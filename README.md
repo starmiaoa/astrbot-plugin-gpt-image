@@ -16,6 +16,7 @@ GPT Image 图片生成插件，支持所有 GPT Image 系列模型。
 - `api.base_url`：填到 `/v1` 即可，例如 `https://api.openai.com/v1`。插件会自动补 `/images/generations` 或 `/images/edits`。
 - `api.model`：按你的供应商要求填写，例如 `gpt-image-2`、`gpt-image-2-all`、`gpt-image-1.5-official`。
 - `api.timeout_seconds`：图像生成可能较慢，建议 120-300 秒。
+- `api.user_agent`：可选。留空时使用插件默认 UA（避开 Cloudflare 对 Python/aiohttp 默认 UA 的拦截规则）；只有当中转明确报 `HTTP 403 cf-ray=...` 或要求特定 UA 时才需要在这里覆盖。
 
 插件内部维护两套参数档案 (`standard` 适配 OpenAI 标准 Images API；`flexible` 适配网页逆向/2api/ToAPIs)。一次请求会先按启发式或上次成功的档案下单；如果上游因为参数格式问题报错，再用另一套档案自动重试一次，成功的档案会缓存到下一次。所以无论你的供应商是哪一种格式都不用手动切换。
 
@@ -72,6 +73,9 @@ GPT Image 图片生成插件，支持所有 GPT Image 系列模型。
 - 参数格式重试只在上游明确报参数格式错误(例如 `unknown parameter`、`size must be one of`、`resolution not supported` 这些)时触发；401/403/429、内容审核拒绝这类错误不会再浪费一次额度去重试。
 - 部分 2api/中转会把参数格式不兼容包装成 `HTTP 500 openai_error`。插件会把这种模糊 5xx 当作可能的兼容性错误，第一次失败后换另一套参数档案再试一次；鉴权、余额、限流、内容安全、模型不存在等明确错误不会切档。
 - 网络抖动重试由 `runtime.retry_times` 控制，覆盖连接重置、握手/读取超时、500/502/503/504/520-526 等瞬时失败。图片生成是 POST 请求，重试次数不建议调太高，避免上游实际已收到任务时重复生成或重复扣费。
+- 所有出站请求默认带一个 `Mozilla/5.0 (compatible; AstrBotGPTImagePlugin/...)` 风格的 User-Agent，避开 Cloudflare 默认拦截 `Python/aiohttp` 这类特征 UA 的规则。可在 `api.user_agent` 覆盖。
+- 上游 403/503 + 含 `cf-ray` / `cloudflare` 的 HTML 响应会被识别为 Cloudflare 拦截页，错误信息会带上 `cf-ray` ID，并提示用户改 `api.user_agent` 或联系中转放行 IP；不会把整页 HTML 直接糊给用户。
+- 网络重试耗尽后区分超时和其他错误：超时会把 `api.timeout_seconds` 实际值带到错误信息里，方便用户知道该调哪个参数。
 - 旧 `openai` / `two_api` 配置块仍然在代码里作为 fallback 读取，且尊重老的 `enabled` 开关。但只要用户在新 `api` 块里改过 `base_url`/`model`/`timeout_seconds` 任一字段，就视为已经迁移到新块，旧块里残留的 Key 不会再被偷偷打到新地址上(避免迁移后旧 Key 被错送到新中转翻车)。
 - 多图编辑上传时重复使用 multipart 字段名 `image`，不要改成 `image[]`，否则严格兼容 OpenAI 的接口可能拒收。
 - `size`、`resolution`、`aspect_ratio` 的归一化逻辑在 `main.py` 里集中处理。改动前建议分别用 OpenAI 标准接口和 2api 类接口验证两套档案路径。

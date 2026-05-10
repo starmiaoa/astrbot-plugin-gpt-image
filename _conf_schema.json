@@ -27,6 +27,12 @@
         "type": "int",
         "default": 180,
         "hint": "图像生成可能较慢，建议 120-300 秒。"
+      },
+      "user_agent": {
+        "description": "自定义 User-Agent",
+        "type": "string",
+        "default": "",
+        "hint": "留空使用插件默认 UA（避开 Cloudflare 默认拦截 Python/aiohttp 的规则）。如果你的中转要求特定 UA 才能访问，在这里覆盖；多数用户不用动。"
       }
     }
   },
