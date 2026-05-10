@@ -75,29 +75,14 @@ OPENAI_SIZE_TO_RATIO = {
     "1024x1536": "2:3",
 }
 
-# Substrings (case-insensitive) that indicate the upstream rejected the
-# request because of a parameter format mismatch rather than auth, quota,
-# moderation, or transport issues. Used to decide whether it is worth
-# retrying with the other compat profile.
+# Keyword sets used by ``ImageAPIError.should_try_other_profile`` to decide
+# whether retrying once with the other compat profile is worth attempting.
 #
-# IMPORTANT: keep these specific. Generic markers like ``invalid_request_error``
-# are deliberately excluded because OpenAI / compatible providers reuse that
-# error type for content-policy refusals and other 400s that should NOT be
-# retried with a different parameter dialect (it would waste quota and could
-# double-fire moderation hits on the same prompt).
-PARAM_ERROR_KEYWORDS = (
-    "size",
-    "aspect_ratio",
-    "aspect ratio",
-    "resolution",
-    "invalid_value",
-    "invalid value",
-    "unknown parameter",
-    "unrecognized",
-    "field required",
-    "must be one of",
-    "not supported",
-)
+# A profile swap helps when the upstream rejected our payload format. It does
+# NOT help and would waste a request when the failure is auth, quota,
+# moderation, or a missing model. The lists below are kept conservative so
+# generic words (``policy`` alone, ``quota`` alone) do not accidentally swallow
+# legitimate parameter errors that mention them in passing.
 CONTENT_POLICY_KEYWORDS = (
     "content_policy",
     "content policy",
@@ -107,12 +92,10 @@ CONTENT_POLICY_KEYWORDS = (
     "violates",
     "violate",
     "inappropriate",
-    "policy",
 )
 BILLING_KEYWORDS = (
     "insufficient_quota",
     "insufficient quota",
-    "quota",
     "billing",
     "exceeded your current quota",
     "exceeded your quota",
@@ -209,7 +192,7 @@ DEFAULT_TOOL_GUIDE = """
     PLUGIN_ID,
     "starmiaoa",
     "GPT Image 图片生成插件，支持所有 GPT Image 系列模型",
-    "1.2.5",
+    "1.2.6",
 )
 class GPTImage2Plugin(Star):
     def __init__(self, context: Context, config: dict | None = None):

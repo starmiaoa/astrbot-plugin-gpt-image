@@ -1,7 +1,7 @@
 name: astrbot_plugin_gpt_image_2
 desc: GPT Image 图片生成插件，支持所有 GPT Image 系列模型；支持手动 /生图、/改图 调用，也支持 LLM 通过函数工具自主调用
 display_name: GPT Image 图像生成
-version: 1.2.5
+version: 1.2.6
 author: starmiaoa
 repo: "https://github.com/starmiaoa/astrbot-plugin-gpt-image"
 astrbot_version: ">=4.0.0"
