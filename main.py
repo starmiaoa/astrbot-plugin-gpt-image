@@ -4,8 +4,9 @@ The plugin exposes a single API config block. Internally it keeps two
 parameter profiles (``standard`` and ``flexible``) that map to OpenAI's
 strict Images API and the looser webpage-reverse / 2api / ToAPIs dialect.
 A profile is picked per request from cache or heuristics; on a parameter
-error from the upstream the request is retried once with the other profile,
-and the successful profile is cached per ``(base_url, model, operation)``.
+or vague upstream compatibility error the request is retried once with the
+other profile, and the successful profile is cached per
+``(base_url, model, operation)``.
 """
 
 from __future__ import annotations
@@ -97,6 +98,38 @@ PARAM_ERROR_KEYWORDS = (
     "must be one of",
     "not supported",
 )
+CONTENT_POLICY_KEYWORDS = (
+    "content_policy",
+    "content policy",
+    "moderation",
+    "safety system",
+    "rejected by safety",
+    "violates",
+    "violate",
+    "inappropriate",
+    "policy",
+)
+BILLING_KEYWORDS = (
+    "insufficient_quota",
+    "insufficient quota",
+    "quota",
+    "billing",
+    "exceeded your current quota",
+    "exceeded your quota",
+    "credit",
+    "balance",
+    "余额",
+)
+NON_PROFILE_ERROR_KEYWORDS = (
+    "invalid api key",
+    "incorrect api key",
+    "unauthorized",
+    "forbidden",
+    "model not found",
+    "model_not_found",
+    "unknown model",
+    "does not exist",
+)
 
 # Defaults for the merged ``api`` config block. Used by ``_new_api_active`` to
 # tell whether the user has actually filled in the new block or is still on
@@ -121,11 +154,28 @@ class ImageAPIError(RuntimeError):
         self.message = message
         self.body = body
 
-    def is_param_error(self) -> bool:
-        if self.status not in {400, 422}:
+    def should_try_other_profile(self) -> bool:
+        """Whether retrying once with the other compat profile is useful.
+
+        Many OpenAI-compatible proxies return vague 5xx errors such as
+        ``openai_error`` for payloads they cannot translate. We only use this
+        on the first profile attempt, so a permissive answer costs at most one
+        extra request before surfacing the real error.
+        """
+        if self.status in {401, 403, 404, 429}:
             return False
         haystack = f"{self.message}\n{self.body}".lower()
-        return any(keyword in haystack for keyword in PARAM_ERROR_KEYWORDS)
+        if any(keyword in haystack for keyword in CONTENT_POLICY_KEYWORDS):
+            return False
+        if any(keyword in haystack for keyword in BILLING_KEYWORDS):
+            return False
+        if any(keyword in haystack for keyword in NON_PROFILE_ERROR_KEYWORDS):
+            return False
+        if self.status in {400, 422}:
+            return True
+        if self.status in TRANSIENT_HTTP_STATUSES and self.status != 408:
+            return True
+        return False
 
 
 DEFAULT_TOOL_GUIDE = """
@@ -159,7 +209,7 @@ DEFAULT_TOOL_GUIDE = """
     PLUGIN_ID,
     "starmiaoa",
     "GPT Image 图片生成插件，支持所有 GPT Image 系列模型",
-    "1.2.4",
+    "1.2.5",
 )
 class GPTImage2Plugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
@@ -457,7 +507,7 @@ class GPTImage2Plugin(Star):
                         exc.status,
                         str(exc.message)[:200],
                     )
-                    if idx == 0 and exc.is_param_error():
+                    if idx == 0 and exc.should_try_other_profile():
                         # Worth a single retry with the other parameter dialect.
                         continue
                     break

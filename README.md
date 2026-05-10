@@ -70,6 +70,7 @@ GPT Image 图片生成插件，支持所有 GPT Image 系列模型。
 
 - 配置只暴露一个 `api` 块。供应商类型由插件运行时自动判断：先按启发式或缓存选一套参数档案 (`standard` / `flexible`)，请求失败且像参数格式错误时再用另一套档案重试一次，成功后把档案按 `(base_url, model, operation)` 缓存到内存。
 - 参数格式重试只在上游明确报参数格式错误(例如 `unknown parameter`、`size must be one of`、`resolution not supported` 这些)时触发；401/403/429、内容审核拒绝这类错误不会再浪费一次额度去重试。
+- 部分 2api/中转会把参数格式不兼容包装成 `HTTP 500 openai_error`。插件会把这种模糊 5xx 当作可能的兼容性错误，第一次失败后换另一套参数档案再试一次；鉴权、余额、限流、内容安全、模型不存在等明确错误不会切档。
 - 网络抖动重试由 `runtime.retry_times` 控制，覆盖连接重置、握手/读取超时、500/502/503/504/520-526 等瞬时失败。图片生成是 POST 请求，重试次数不建议调太高，避免上游实际已收到任务时重复生成或重复扣费。
 - 旧 `openai` / `two_api` 配置块仍然在代码里作为 fallback 读取，且尊重老的 `enabled` 开关。但只要用户在新 `api` 块里改过 `base_url`/`model`/`timeout_seconds` 任一字段，就视为已经迁移到新块，旧块里残留的 Key 不会再被偷偷打到新地址上(避免迁移后旧 Key 被错送到新中转翻车)。
 - 多图编辑上传时重复使用 multipart 字段名 `image`，不要改成 `image[]`，否则严格兼容 OpenAI 的接口可能拒收。
