@@ -65,7 +65,7 @@ VALID_QUALITIES = {"auto", "low", "medium", "high"}
 VALID_OUTPUT_FORMATS = {"png", "jpeg", "webp"}
 VALID_BACKGROUNDS = {"auto", "transparent", "opaque"}
 VALID_INPUT_CONTENT_TYPES = {"image/png", "image/jpeg", "image/webp"}
-TRANSIENT_HTTP_STATUSES = {408, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526}
+TRANSIENT_HTTP_STATUSES = {408, 500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526}
 NETWORK_RETRY_BASE_DELAY_SECONDS = 1.5
 
 OPENAI_SIZE_TO_RATIO = {
@@ -159,7 +159,7 @@ DEFAULT_TOOL_GUIDE = """
     PLUGIN_ID,
     "starmiaoa",
     "GPT Image 图片生成插件，支持所有 GPT Image 系列模型",
-    "1.2.3",
+    "1.2.4",
 )
 class GPTImage2Plugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
