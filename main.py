@@ -176,11 +176,7 @@ class ImageAPIError(RuntimeError):
             return False
         if any(keyword in haystack for keyword in NON_PROFILE_ERROR_KEYWORDS):
             return False
-        if self.status in {400, 422}:
-            return True
-        if self.status in TRANSIENT_HTTP_STATUSES and self.status != 408:
-            return True
-        return False
+        return self.status in {400, 422}
 
 
 DEFAULT_TOOL_GUIDE = """
@@ -214,7 +210,7 @@ DEFAULT_TOOL_GUIDE = """
     PLUGIN_ID,
     "starmiaoa",
     "GPT Image 图片生成插件，支持所有 GPT Image 系列模型",
-    "1.2.7",
+    "1.2.8",
 )
 class GPTImage2Plugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
@@ -498,6 +494,11 @@ class GPTImage2Plugin(Star):
                     transparent_background=transparent_background,
                     reference_image_paths=references,
                 )
+                self._log_request_start(
+                    operation=operation,
+                    profile=profile,
+                    payload=payload,
+                )
                 try:
                     if references:
                         response = await self._post_images_edit_api(api_key, payload, references)
@@ -558,7 +559,7 @@ class GPTImage2Plugin(Star):
         url = self._images_generation_url()
         headers = self._api_headers(api_key, content_type="application/json")
         timeout = aiohttp.ClientTimeout(total=max(10, self._timeout_seconds()))
-        retry_times = self._network_retry_times()
+        retry_times = self._mutation_retry_times()
 
         for attempt in range(retry_times + 1):
             try:
@@ -601,7 +602,7 @@ class GPTImage2Plugin(Star):
         url = self._images_edit_url()
         headers = self._api_headers(api_key)
         timeout = aiohttp.ClientTimeout(total=max(10, self._timeout_seconds()))
-        retry_times = self._network_retry_times()
+        retry_times = self._mutation_retry_times()
 
         for attempt in range(retry_times + 1):
             form = aiohttp.FormData()
@@ -758,6 +759,27 @@ class GPTImage2Plugin(Star):
 
     def _network_retry_times(self) -> int:
         return min(5, max(0, self._int_cfg("runtime", "retry_times", 1)))
+
+    def _mutation_retry_times(self) -> int:
+        # Image generation/edit requests are side-effecting POSTs. If the
+        # upstream accepts the job but the client times out before receiving the
+        # response, retrying can create a second paid image task. Until the
+        # supplier exposes a reliable idempotency key, keep POST retries off.
+        return 0
+
+    def _log_request_start(self, *, operation: str, profile: str, payload: dict[str, Any]) -> None:
+        url = self._images_edit_url() if operation == "edit" else self._images_generation_url()
+        logger.info(
+            "GPT Image request start operation=%s profile=%s model=%s url=%s timeout=%s retry=%s size=%s resolution=%s",
+            operation,
+            profile,
+            payload.get("model", ""),
+            url,
+            self._timeout_seconds(),
+            self._mutation_retry_times(),
+            payload.get("size", ""),
+            payload.get("resolution", ""),
+        )
 
     def _transient_network_exceptions(self) -> tuple[type[BaseException], ...]:
         return (aiohttp.ClientError, asyncio.TimeoutError, TimeoutError, ConnectionError)
