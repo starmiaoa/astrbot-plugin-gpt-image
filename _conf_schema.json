@@ -53,7 +53,7 @@
         "type": "string",
         "default": "1k",
         "options": ["auto", "1k", "2k", "4k"],
-        "hint": "GPT 图像模型的清晰度档位。供应商支持时会生效；不支持时可能会忽略。"
+        "hint": "GPT 图像模型的清晰度档位。供应商支持时会生效；4K 或某些参数不支持时，插件会尽量自动降级为更兼容的 2K 请求。"
       },
       "aspect_ratio": {
         "description": "默认比例",

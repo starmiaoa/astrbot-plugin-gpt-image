@@ -219,6 +219,26 @@ class ImageAPIError(RuntimeError):
             return False
         return self.status in {400, 422}
 
+    def should_try_payload_fallback(self) -> bool:
+        """Whether a safer payload variant is worth trying.
+
+        Some reverse or OpenAI-compatible suppliers respond with vague 5xx
+        errors when a single optional field is unsupported. We only use this
+        for local payload downgrades such as removing ``background`` or
+        lowering ``resolution``; auth, quota, moderation, and missing-model
+        errors should surface immediately.
+        """
+        if self.status in {401, 403, 404, 429}:
+            return False
+        haystack = f"{self.message}\n{self.body}".lower()
+        if any(keyword in haystack for keyword in CONTENT_POLICY_KEYWORDS):
+            return False
+        if any(keyword in haystack for keyword in BILLING_KEYWORDS):
+            return False
+        if any(keyword in haystack for keyword in NON_PROFILE_ERROR_KEYWORDS):
+            return False
+        return self.status in {400, 422, 500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526}
+
 
 DEFAULT_TOOL_GUIDE = """
 # GPT Image 画图工具使用说明
@@ -251,7 +271,7 @@ DEFAULT_TOOL_GUIDE = """
     PLUGIN_ID,
     "starmiaoa",
     "GPT Image 图片生成插件，支持所有 GPT Image 系列模型",
-    "1.2.11",
+    "1.2.12",
 )
 class GPTImage2Plugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
@@ -535,32 +555,44 @@ class GPTImage2Plugin(Star):
                     transparent_background=transparent_background,
                     reference_image_paths=references,
                 )
-                self._log_request_start(
-                    operation=operation,
-                    profile=profile,
-                    payload=payload,
-                )
-                try:
-                    if references:
-                        response = await self._post_images_edit_api(api_key, payload, references)
-                    else:
-                        response = await self._post_images_generation_api(api_key, payload)
-                except ImageAPIError as exc:
-                    errors.append(exc)
-                    logger.warning(
-                        "GPT Image %s with profile=%s failed: HTTP %d %s",
-                        operation,
-                        profile,
-                        exc.status,
-                        str(exc.message)[:200],
+                payload_attempts = [payload, *self._payload_fallbacks(payload)]
+                for payload_idx, payload_attempt in enumerate(payload_attempts):
+                    self._log_request_start(
+                        operation=operation,
+                        profile=profile,
+                        payload=payload_attempt,
                     )
-                    if idx == 0 and exc.should_try_other_profile():
-                        # Worth a single retry with the other parameter dialect.
-                        continue
+                    try:
+                        if references:
+                            response = await self._post_images_edit_api(api_key, payload_attempt, references)
+                        else:
+                            response = await self._post_images_generation_api(api_key, payload_attempt)
+                    except ImageAPIError as exc:
+                        errors.append(exc)
+                        logger.warning(
+                            "GPT Image %s with profile=%s payload_variant=%d failed: HTTP %d %s",
+                            operation,
+                            profile,
+                            payload_idx,
+                            exc.status,
+                            str(exc.message)[:200],
+                        )
+                        has_payload_fallback = payload_idx + 1 < len(payload_attempts)
+                        if has_payload_fallback and exc.should_try_payload_fallback():
+                            continue
+                        if idx == 0 and exc.should_try_other_profile():
+                            # Worth a single retry with the other parameter dialect.
+                            break
+                        payload_attempts = []
+                        break
+                    else:
+                        succeeded_profile = profile
+                        break
+                if response is not None:
                     break
-                else:
-                    succeeded_profile = profile
-                    break
+                if payload_attempts:
+                    continue
+                break
 
             if response is None:
                 if not errors:
@@ -893,6 +925,19 @@ class GPTImage2Plugin(Star):
             "n": 1,
         }
 
+        normalized_ratio = self._normalize_aspect_ratio(
+            aspect_ratio,
+            size=size,
+            reference_image_paths=reference_image_paths,
+            prefer_reference_ratio=bool(reference_image_paths),
+        )
+        normalized_resolution = self._normalize_resolution(resolution)
+        if normalized_resolution == "4k" and (
+            self._model_supports_gpt_image_2_sizes()
+            or (profile == "flexible" and normalized_ratio not in VALID_4K_ASPECT_RATIOS)
+        ):
+            normalized_resolution = "2k"
+
         # ``standard`` keeps the OpenAI-strict size grammar (pixel sizes only,
         # ratios mapped to one of three OpenAI-accepted dimensions). ``flexible``
         # lets the size field carry an aspect ratio string the way most webpage
@@ -908,27 +953,14 @@ class GPTImage2Plugin(Star):
             normalized_size = self._normalize_openai_size(
                 size,
                 aspect_ratio=aspect_ratio,
-                resolution=resolution,
+                resolution=normalized_resolution,
                 reference_image_paths=reference_image_paths,
                 prefer_reference_ratio=bool(reference_image_paths),
             )
         if normalized_size != "auto":
             payload["size"] = normalized_size
 
-        normalized_ratio = self._normalize_aspect_ratio(
-            aspect_ratio,
-            size=size,
-            reference_image_paths=reference_image_paths,
-            prefer_reference_ratio=bool(reference_image_paths),
-        )
-        normalized_resolution = self._normalize_resolution(resolution)
         if normalized_resolution != "auto":
-            if (
-                normalized_resolution == "4k"
-                and normalized_ratio not in VALID_4K_ASPECT_RATIOS
-                and (profile == "flexible" or self._model_supports_gpt_image_2_sizes())
-            ):
-                normalized_resolution = "2k"
             payload["resolution"] = normalized_resolution
 
         normalized_quality = self._normalize_quality(quality)
@@ -947,7 +979,12 @@ class GPTImage2Plugin(Star):
 
         background = "transparent" if transparent_background else configured_background
         background = background if background in VALID_BACKGROUNDS else "auto"
-        if background != "auto":
+        if background == "transparent" and self._model_supports_gpt_image_2_sizes():
+            payload["prompt"] = self._append_prompt_hint(
+                str(payload.get("prompt", "")),
+                "Render with a transparent background.",
+            )
+        elif background != "auto":
             payload["background"] = background
 
         moderation = self._str_cfg("image", "moderation", "")
@@ -955,6 +992,66 @@ class GPTImage2Plugin(Star):
             payload["moderation"] = moderation
 
         return payload
+
+    def _payload_fallbacks(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        fallbacks: list[dict[str, Any]] = []
+        base = dict(payload)
+
+        if base.get("background") == "transparent":
+            transparent_prompt_payload = dict(base)
+            transparent_prompt_payload.pop("background", None)
+            transparent_prompt_payload["prompt"] = self._append_prompt_hint(
+                str(transparent_prompt_payload.get("prompt", "")),
+                "Render with a transparent background.",
+            )
+            fallbacks.append(transparent_prompt_payload)
+
+        if base.get("resolution") == "4k":
+            downgraded_resolution_payload = self._downgrade_4k_payload(base)
+            if downgraded_resolution_payload != base:
+                fallbacks.append(downgraded_resolution_payload)
+
+        if base.get("background") == "transparent" and base.get("resolution") == "4k":
+            combined_payload = self._downgrade_4k_payload(base)
+            combined_payload.pop("background", None)
+            combined_payload["prompt"] = self._append_prompt_hint(
+                str(combined_payload.get("prompt", "")),
+                "Render with a transparent background.",
+            )
+            if combined_payload != base:
+                fallbacks.append(combined_payload)
+
+        unique: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for fallback in fallbacks:
+            key = json.dumps(fallback, ensure_ascii=False, sort_keys=True, default=str)
+            if key in seen or fallback == payload:
+                continue
+            seen.add(key)
+            unique.append(fallback)
+        return unique
+
+    def _downgrade_4k_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        downgraded = dict(payload)
+        downgraded["resolution"] = "2k"
+        size = str(downgraded.get("size", "")).strip().lower()
+        ratio = self._parse_aspect_ratio(size)
+        if not ratio:
+            ratio = self._ratio_from_pixel_size(size)
+        if ratio:
+            two_k_size = GPT_IMAGE_2_SIZE_TABLE["2k"].get(ratio)
+            if two_k_size:
+                downgraded["size"] = two_k_size
+        return downgraded
+
+    def _append_prompt_hint(self, prompt: str, hint: str) -> str:
+        prompt = prompt.strip()
+        hint = hint.strip()
+        if not hint:
+            return prompt
+        if hint.lower() in prompt.lower():
+            return prompt
+        return f"{prompt}\n\n{hint}" if prompt else hint
 
     def _build_prompt(self, prompt: str, style: str | None) -> str:
         parts = []
@@ -1455,6 +1552,9 @@ class GPTImage2Plugin(Star):
         size_value = self._normalize_pixel_size(size)
         if size_value in OPENAI_SIZE_TO_RATIO:
             return OPENAI_SIZE_TO_RATIO[size_value]
+        size_ratio_from_pixels = self._ratio_from_pixel_size(size_value)
+        if size_ratio_from_pixels:
+            return size_ratio_from_pixels
 
         if prefer_reference_ratio and reference_image_paths:
             reference_ratio = self._reference_image_aspect_ratio(reference_image_paths[0])
@@ -1492,6 +1592,17 @@ class GPTImage2Plugin(Star):
         if ratio in VALID_ASPECT_RATIOS:
             return ratio
         return self._nearest_supported_aspect_ratio(left / right)
+
+    def _ratio_from_pixel_size(self, value: str | None) -> str:
+        text = (value or "").strip().lower().replace("*", "x").replace(" ", "")
+        match = re.fullmatch(r"(\d{3,5})x(\d{3,5})", text)
+        if not match:
+            return ""
+        width = int(match.group(1))
+        height = int(match.group(2))
+        if width <= 0 or height <= 0:
+            return ""
+        return self._nearest_supported_aspect_ratio(width / height)
 
     def _reference_image_aspect_ratio(self, image_path: str) -> str:
         size = self._image_dimensions(image_path)
