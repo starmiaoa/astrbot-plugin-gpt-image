@@ -237,7 +237,7 @@ class ImageAPIError(RuntimeError):
             return False
         if any(keyword in haystack for keyword in NON_PROFILE_ERROR_KEYWORDS):
             return False
-        return self.status in {400, 422, 500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526}
+        return self.status in {400, 422}
 
 
 DEFAULT_TOOL_GUIDE = """
@@ -933,7 +933,7 @@ class GPTImage2Plugin(Star):
         )
         normalized_resolution = self._normalize_resolution(resolution)
         if normalized_resolution == "4k" and (
-            self._model_supports_gpt_image_2_sizes()
+            self._use_gpt_image_2_extended_sizes()
             or (profile == "flexible" and normalized_ratio not in VALID_4K_ASPECT_RATIOS)
         ):
             normalized_resolution = "2k"
@@ -960,7 +960,7 @@ class GPTImage2Plugin(Star):
         if normalized_size != "auto":
             payload["size"] = normalized_size
 
-        if normalized_resolution != "auto":
+        if normalized_resolution != "auto" and self._should_send_resolution(profile):
             payload["resolution"] = normalized_resolution
 
         normalized_quality = self._normalize_quality(quality)
@@ -979,7 +979,7 @@ class GPTImage2Plugin(Star):
 
         background = "transparent" if transparent_background else configured_background
         background = background if background in VALID_BACKGROUNDS else "auto"
-        if background == "transparent" and self._model_supports_gpt_image_2_sizes():
+        if background == "transparent" and self._use_gpt_image_2_extended_sizes():
             payload["prompt"] = self._append_prompt_hint(
                 str(payload.get("prompt", "")),
                 "Render with a transparent background.",
@@ -1526,7 +1526,7 @@ class GPTImage2Plugin(Star):
         value = value.replace("*", "x").replace(" ", "")
         if value in VALID_OPENAI_SIZES:
             return value
-        if re.fullmatch(r"\d{3,4}x\d{3,4}", value):
+        if self._use_gpt_image_2_extended_sizes() and re.fullmatch(r"\d{3,4}x\d{3,4}", value):
             return value
         return ""
 
@@ -1632,7 +1632,7 @@ class GPTImage2Plugin(Star):
         return "1024x1536"
 
     def _gpt_image_2_size_for_ratio(self, ratio: str, resolution: str) -> str:
-        if not self._model_supports_gpt_image_2_sizes():
+        if not self._use_gpt_image_2_extended_sizes():
             return ""
         tier = resolution if resolution in VALID_RESOLUTIONS else "auto"
         if tier == "auto":
@@ -1645,6 +1645,9 @@ class GPTImage2Plugin(Star):
         if tier == "4k":
             return GPT_IMAGE_2_SIZE_TABLE["2k"].get(ratio, "")
         return ""
+
+    def _should_send_resolution(self, profile: str) -> bool:
+        return profile == "flexible"
 
     def _normalize_compatible_size(
         self,
@@ -1991,6 +1994,20 @@ class GPTImage2Plugin(Star):
     def _model_supports_gpt_image_2_sizes(self) -> bool:
         model = self._model_name().strip().lower()
         return model == "gpt-image-2" or model.startswith("gpt-image-2-20")
+
+    def _use_gpt_image_2_extended_sizes(self) -> bool:
+        return self._model_supports_gpt_image_2_sizes() and not self._is_official_openai_endpoint()
+
+    def _is_official_openai_endpoint(self) -> bool:
+        try:
+            from urllib.parse import urlparse
+
+            host = urlparse(self._base_url()).hostname or ""
+        except Exception:
+            logger.debug("Failed to parse GPT Image base_url", exc_info=True)
+            return False
+        host = host.lower()
+        return host == "api.openai.com" or host.endswith(".api.openai.com")
 
     def _build_api_error(self, status: int, body: str) -> ImageAPIError:
         try:
