@@ -114,6 +114,12 @@
         "type": "string",
         "default": "",
         "hint": "图像接口没有独立 negative prompt，本插件会把它追加成 Avoid: ...。"
+      },
+      "prevent_prompt_rewrite": {
+        "description": "尽量禁止接口改写提示词",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后会在用户提示词前追加一句英文保护前缀，要求图像模型把后续文本当作完整提示词，不要改写。对容易自行改写 prompt 的 GPT 图像接口更稳。"
       }
     }
   },

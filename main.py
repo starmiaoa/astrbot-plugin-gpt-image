@@ -121,6 +121,7 @@ NON_PROFILE_ERROR_KEYWORDS = (
 DEFAULT_API_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_API_MODEL = "gpt-image-2"
 DEFAULT_API_TIMEOUT = 180
+PROMPT_REWRITE_GUARD_PREFIX = "Use the following text as the complete prompt. Do not rewrite it:"
 
 # aiohttp's default User-Agent looks like ``Python/3.x aiohttp/3.y``. Some
 # middlemen place broad Cloudflare rules in front of API endpoints that block
@@ -210,7 +211,7 @@ DEFAULT_TOOL_GUIDE = """
     PLUGIN_ID,
     "starmiaoa",
     "GPT Image 图片生成插件，支持所有 GPT Image 系列模型",
-    "1.2.8",
+    "1.2.9",
 )
 class GPTImage2Plugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
@@ -915,10 +916,14 @@ class GPTImage2Plugin(Star):
         prefix = self._str_cfg("prompt", "prompt_prefix", "")
         suffix = self._str_cfg("prompt", "prompt_suffix", "")
         negative = self._str_cfg("prompt", "negative_prompt", "")
+        guard = self._bool_cfg("prompt", "prevent_prompt_rewrite", True)
 
         if prefix:
             parts.append(prefix.strip())
-        parts.append(prompt.strip())
+        user_prompt = prompt.strip()
+        if guard and user_prompt:
+            user_prompt = f"{PROMPT_REWRITE_GUARD_PREFIX}\n{user_prompt}"
+        parts.append(user_prompt)
         if style and style.strip() and style.strip().lower() != "auto":
             parts.append(f"Visual style: {style.strip()}.")
         if suffix:
@@ -1154,7 +1159,21 @@ class GPTImage2Plugin(Star):
             prompt_parts.append(token)
             i += 1
 
-        return opts, " ".join(prompt_parts).strip()
+        prompt = " ".join(prompt_parts).strip()
+        self._extract_natural_language_options(opts, prompt)
+        return opts, prompt
+
+    def _extract_natural_language_options(self, opts: dict[str, Any], prompt: str) -> None:
+        if not prompt:
+            return
+        if not opts.get("aspect_ratio"):
+            ratio = self._extract_ratio_from_text(prompt)
+            if ratio:
+                opts["aspect_ratio"] = ratio
+        if not opts.get("resolution"):
+            resolution = self._extract_resolution_from_text(prompt)
+            if resolution:
+                opts["resolution"] = resolution
 
     def _assign_size_like_option(self, opts: dict[str, Any], value: str) -> None:
         normalized = (value or "").strip().lower()
@@ -1171,6 +1190,44 @@ class GPTImage2Plugin(Star):
             opts["resolution"] = normalized
             return
         opts["size"] = value
+
+    def _extract_ratio_from_text(self, text: str) -> str:
+        for match in re.finditer(r"(?<!\d)(\d{1,2})\s*[:：]\s*(\d{1,2})(?!\d)", text):
+            start = max(0, match.start() - 16)
+            end = min(len(text), match.end() + 16)
+            context = text[start:end].lower()
+            if any(keyword in context for keyword in ("不要当比例", "不是比例", "非比例", "not ratio", "not aspect")):
+                continue
+            if not any(
+                keyword in context
+                for keyword in (
+                    "比例",
+                    "宽高比",
+                    "寬高比",
+                    "画幅",
+                    "畫幅",
+                    "横竖比",
+                    "纵横比",
+                    "ratio",
+                    "aspect",
+                    "aspect ratio",
+                )
+            ):
+                continue
+            ratio = self._parse_aspect_ratio(f"{match.group(1)}:{match.group(2)}")
+            if ratio:
+                return ratio
+        return ""
+
+    def _extract_resolution_from_text(self, text: str) -> str:
+        lowered = text.lower()
+        for match in re.finditer(r"(?<![a-z0-9])([124])\s*k(?![a-z0-9])", lowered):
+            start = max(0, match.start() - 12)
+            end = min(len(lowered), match.end() + 12)
+            context = lowered[start:end]
+            if any(keyword in context for keyword in ("分辨率", "清晰度", "resolution", "画质", "畫質")):
+                return f"{match.group(1)}k"
+        return ""
 
     def _extract_command_prompt(self, event: AstrMessageEvent, command_names: tuple[str, ...]) -> str:
         text = self._event_text(event)

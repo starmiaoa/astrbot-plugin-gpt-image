@@ -29,6 +29,7 @@ GPT Image 图片生成插件，支持所有 GPT Image 系列模型。
 - `image.aspect_ratio`：默认比例。支持比例参数的供应商会按比例出图；OpenAI 官方会近似映射为方图、横图或竖图。改图没传比例时优先按第一张参考图比例。
 - `image.max_reference_images`：最多参考图数量，GPT 图像编辑接口最多 16 张。
 - `runtime.retry_times`：网络抖动重试次数。默认 `1`，只用于下载图片等无副作用请求。生成/改图是 POST 任务提交，为避免超时后重复生成或重复扣费，插件不会自动重试这类请求。
+- `prompt.prevent_prompt_rewrite`：默认开启，会在提示词前追加 `Use the following text as the complete prompt. Do not rewrite it:`，尽量避免 GPT 图像接口自行改写用户提示词。
 
 `image.size`、`image.resolution` 和 `image.aspect_ratio` 是三个不同概念：`size` 是具体像素尺寸，`resolution` 是 1K/2K/4K 清晰度档位，`aspect_ratio` 是画面比例。命令里显式传 `--size`、`--ratio` 或 `--resolution` 时，显式参数优先。
 
@@ -55,6 +56,8 @@ GPT Image 图片生成插件，支持所有 GPT Image 系列模型。
 - `--transparent`：透明背景。
 
 如果不添加参数则使用astrbot插件设置参数
+
+命令会保留用户提示词原文；外层引号只用于分组，提交给上游时会去掉。自然语言里写“宽高比设为 16:9 / 比例 9:16 / 分辨率 2K”时，插件会自动抽取为接口参数，不需要额外写 `--ratio` 或 `--resolution`。
 
 ## Bot 自动调用
 
