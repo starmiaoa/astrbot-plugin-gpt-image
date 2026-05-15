@@ -19,8 +19,8 @@
       "model": {
         "description": "模型名",
         "type": "string",
-        "default": "gpt-image-2",
-        "hint": "按你的供应商要求填写，例如 gpt-image-2、gpt-image-2-all、gpt-image-1.5-official。"
+        "default": "gpt-image-1.5",
+        "hint": "OpenAI 官方接口建议使用 gpt-image-1.5、gpt-image-1 或 gpt-image-1-mini；中转/网页逆向渠道按供应商要求填写，例如 gpt-image-2、gpt-image-2-all、gpt-image-1.5-official。"
       },
       "timeout_seconds": {
         "description": "请求超时秒数",
@@ -46,14 +46,14 @@
         "type": "string",
         "default": "auto",
         "options": ["auto", "1024x1024", "1536x1024", "1024x1536"],
-        "hint": "宽x高像素。auto 表示按默认比例和默认分辨率自动换算。GPT Image 2 在 2K/4K 档会使用更大的像素尺寸；部分兼容站如果不支持会自动切换参数格式重试。"
+        "hint": "宽x高像素。auto 表示按默认比例和默认分辨率自动换算。OpenAI 官方接口使用官方尺寸白名单；部分 GPT Image 2 兼容站支持更大的像素尺寸。"
       },
       "resolution": {
         "description": "默认分辨率",
         "type": "string",
         "default": "1k",
         "options": ["auto", "1k", "2k", "4k"],
-        "hint": "GPT 图像模型的清晰度档位。供应商支持时会生效；4K 或某些参数不支持时，插件会尽量自动降级为更兼容的 2K 请求。"
+        "hint": "GPT 图像模型的清晰度档位。OpenAI 官方接口会通过 size 映射表达，不额外发送 resolution 字段；兼容/逆向渠道支持时会生效。"
       },
       "aspect_ratio": {
         "description": "默认比例",

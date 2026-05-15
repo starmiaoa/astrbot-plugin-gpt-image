@@ -159,7 +159,7 @@ NON_PROFILE_ERROR_KEYWORDS = (
 # the auto-populated schema defaults (in which case we should fall back to
 # the legacy ``openai`` / ``two_api`` blocks).
 DEFAULT_API_BASE_URL = "https://api.openai.com/v1"
-DEFAULT_API_MODEL = "gpt-image-2"
+DEFAULT_API_MODEL = "gpt-image-1.5"
 DEFAULT_API_TIMEOUT = 180
 PROMPT_REWRITE_GUARD_PREFIX = "Use the following text as the complete prompt. Do not rewrite it:"
 
@@ -239,6 +239,10 @@ class ImageAPIError(RuntimeError):
             return False
         return self.status in {400, 422}
 
+    def mentions_any(self, keywords: tuple[str, ...]) -> bool:
+        haystack = f"{self.message}\n{self.body}".lower()
+        return any(keyword in haystack for keyword in keywords)
+
 
 DEFAULT_TOOL_GUIDE = """
 # GPT Image 画图工具使用说明
@@ -271,7 +275,7 @@ DEFAULT_TOOL_GUIDE = """
     PLUGIN_ID,
     "starmiaoa",
     "GPT Image 图片生成插件，支持所有 GPT Image 系列模型",
-    "1.2.12",
+    "1.2.13",
 )
 class GPTImage2Plugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
@@ -555,7 +559,7 @@ class GPTImage2Plugin(Star):
                     transparent_background=transparent_background,
                     reference_image_paths=references,
                 )
-                payload_attempts = [payload, *self._payload_fallbacks(payload)]
+                payload_attempts = [payload]
                 for payload_idx, payload_attempt in enumerate(payload_attempts):
                     self._log_request_start(
                         operation=operation,
@@ -577,8 +581,14 @@ class GPTImage2Plugin(Star):
                             exc.status,
                             str(exc.message)[:200],
                         )
+                        if (
+                            payload_idx == 0
+                            and exc.should_try_payload_fallback()
+                            and len(payload_attempts) == 1
+                        ):
+                            payload_attempts.extend(self._payload_fallbacks(payload_attempt, exc))
                         has_payload_fallback = payload_idx + 1 < len(payload_attempts)
-                        if has_payload_fallback and exc.should_try_payload_fallback():
+                        if has_payload_fallback:
                             continue
                         if idx == 0 and exc.should_try_other_profile():
                             # Worth a single retry with the other parameter dialect.
@@ -932,9 +942,8 @@ class GPTImage2Plugin(Star):
             prefer_reference_ratio=bool(reference_image_paths),
         )
         normalized_resolution = self._normalize_resolution(resolution)
-        if normalized_resolution == "4k" and (
-            self._use_gpt_image_2_extended_sizes()
-            or (profile == "flexible" and normalized_ratio not in VALID_4K_ASPECT_RATIOS)
+        if normalized_resolution == "4k" and normalized_ratio not in VALID_4K_ASPECT_RATIOS and (
+            self._use_gpt_image_2_extended_sizes() or profile == "flexible"
         ):
             normalized_resolution = "2k"
 
@@ -993,11 +1002,17 @@ class GPTImage2Plugin(Star):
 
         return payload
 
-    def _payload_fallbacks(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
+    def _payload_fallbacks(self, payload: dict[str, Any], error: ImageAPIError) -> list[dict[str, Any]]:
         fallbacks: list[dict[str, Any]] = []
         base = dict(payload)
+        background_error = error.mentions_any(
+            ("background", "transparent", "unsupported parameter", "unknown parameter", "invalid parameter")
+        )
+        resolution_error = error.mentions_any(
+            ("resolution", "unsupported parameter", "unknown parameter", "invalid parameter", "size")
+        )
 
-        if base.get("background") == "transparent":
+        if base.get("background") == "transparent" and background_error:
             transparent_prompt_payload = dict(base)
             transparent_prompt_payload.pop("background", None)
             transparent_prompt_payload["prompt"] = self._append_prompt_hint(
@@ -1006,18 +1021,23 @@ class GPTImage2Plugin(Star):
             )
             fallbacks.append(transparent_prompt_payload)
 
-        if base.get("resolution") == "4k":
+        if base.get("resolution") == "4k" and resolution_error:
             downgraded_resolution_payload = self._downgrade_4k_payload(base)
             if downgraded_resolution_payload != base:
                 fallbacks.append(downgraded_resolution_payload)
 
-        if base.get("background") == "transparent" and base.get("resolution") == "4k":
+        if (
+            base.get("background") == "transparent"
+            and base.get("resolution") == "4k"
+            and (background_error or resolution_error)
+        ):
             combined_payload = self._downgrade_4k_payload(base)
-            combined_payload.pop("background", None)
-            combined_payload["prompt"] = self._append_prompt_hint(
-                str(combined_payload.get("prompt", "")),
-                "Render with a transparent background.",
-            )
+            if background_error:
+                combined_payload.pop("background", None)
+                combined_payload["prompt"] = self._append_prompt_hint(
+                    str(combined_payload.get("prompt", "")),
+                    "Render with a transparent background.",
+                )
             if combined_payload != base:
                 fallbacks.append(combined_payload)
 
