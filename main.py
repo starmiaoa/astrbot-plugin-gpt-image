@@ -1754,17 +1754,18 @@ class GPTImage2Plugin(Star):
         if self._normalize_pixel_size(size):
             return "standard"
 
-        # OpenAI strict can only express 1:1, 3:2, and 2:3 cleanly via its
-        # three accepted pixel sizes. Any other ratio (16:9, 21:9, ...) is
-        # better expressed by keeping the ratio in ``size`` (flexible). The
-        # retry mechanism still falls back to standard if flexible fails.
+        # Webpage-reverse models often advertise broader aspect ratios through
+        # the ``size`` field. Standard OpenAI-compatible endpoints commonly
+        # reject ``size=16:9`` and expect a pixel size instead, so only start
+        # with the flexible dialect when the model name clearly looks like a
+        # reverse/web profile.
         explicit_ratio = self._parse_aspect_ratio(aspect_ratio) or self._parse_aspect_ratio(size)
-        if explicit_ratio and explicit_ratio not in {"1:1", "3:2", "2:3"}:
+        if explicit_ratio and explicit_ratio not in {"1:1", "3:2", "2:3"} and self._model_prefers_flexible_profile():
             return "flexible"
 
         # Image edits with reference images and no explicit ratio: flexible
         # can keep the original ratio without rounding to one of three sizes.
-        if operation == "edit" and reference_image_paths:
+        if operation == "edit" and reference_image_paths and self._model_prefers_flexible_profile():
             return "flexible"
 
         return "standard"
@@ -1780,16 +1781,34 @@ class GPTImage2Plugin(Star):
         """Whether this request should override the cached compat profile.
 
         Cache is useful for ambiguous defaults, but an explicit pixel size,
-        a wide/tall ratio that OpenAI strict cannot represent exactly, or an
-        edit request that should follow the reference image is a stronger
-        signal than whatever succeeded on an earlier request.
+        an explicit ratio request, or an edit request that should follow the
+        reference image for a known-flexible model is a stronger signal than
+        whatever succeeded on an earlier request.
         """
         if self._normalize_pixel_size(size):
             return True
         explicit_ratio = self._parse_aspect_ratio(aspect_ratio) or self._parse_aspect_ratio(size)
-        if explicit_ratio and explicit_ratio not in {"1:1", "3:2", "2:3"}:
+        if explicit_ratio:
             return True
-        return operation == "edit" and bool(reference_image_paths)
+        if operation == "edit" and reference_image_paths:
+            return self._model_prefers_flexible_profile()
+        return False
+
+    def _model_prefers_flexible_profile(self) -> bool:
+        """Whether the configured model name looks like a webpage-reverse SKU."""
+        model = self._model_name().lower()
+        flexible_markers = (
+            "-all",
+            "_all",
+            "official",
+            "toapi",
+            "2api",
+            "reverse",
+            "web",
+        )
+        if any(marker in model for marker in flexible_markers):
+            return True
+        return model in {"gpt-image-1.5", "gpt-image-1.5-official"}
 
     def _build_api_error(self, status: int, body: str) -> ImageAPIError:
         try:
