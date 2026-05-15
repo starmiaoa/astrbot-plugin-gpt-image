@@ -74,6 +74,46 @@ OPENAI_SIZE_TO_RATIO = {
     "1536x1024": "3:2",
     "1024x1536": "2:3",
 }
+GPT_IMAGE_2_SIZE_TABLE = {
+    "1k": {
+        "1:1": "1024x1024",
+        "3:2": "1536x1024",
+        "2:3": "1024x1536",
+        "4:3": "1024x768",
+        "3:4": "768x1024",
+        "5:4": "1280x1024",
+        "4:5": "1024x1280",
+        "16:9": "1536x864",
+        "9:16": "864x1536",
+        "2:1": "2048x1024",
+        "1:2": "1024x2048",
+        "21:9": "2016x864",
+        "9:21": "864x2016",
+    },
+    "2k": {
+        "1:1": "2048x2048",
+        "3:2": "2048x1360",
+        "2:3": "1360x2048",
+        "4:3": "2048x1536",
+        "3:4": "1536x2048",
+        "5:4": "2560x2048",
+        "4:5": "2048x2560",
+        "16:9": "2048x1152",
+        "9:16": "1152x2048",
+        "2:1": "2688x1344",
+        "1:2": "1344x2688",
+        "21:9": "2688x1152",
+        "9:21": "1152x2688",
+    },
+    "4k": {
+        "16:9": "3840x2160",
+        "9:16": "2160x3840",
+        "2:1": "3840x1920",
+        "1:2": "1920x3840",
+        "21:9": "3840x1648",
+        "9:21": "1648x3840",
+    },
+}
 
 # Keyword sets used by ``ImageAPIError.should_try_other_profile`` to decide
 # whether retrying once with the other compat profile is worth attempting.
@@ -211,7 +251,7 @@ DEFAULT_TOOL_GUIDE = """
     PLUGIN_ID,
     "starmiaoa",
     "GPT Image 图片生成插件，支持所有 GPT Image 系列模型",
-    "1.2.10",
+    "1.2.11",
 )
 class GPTImage2Plugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
@@ -868,6 +908,7 @@ class GPTImage2Plugin(Star):
             normalized_size = self._normalize_openai_size(
                 size,
                 aspect_ratio=aspect_ratio,
+                resolution=resolution,
                 reference_image_paths=reference_image_paths,
                 prefer_reference_ratio=bool(reference_image_paths),
             )
@@ -882,7 +923,11 @@ class GPTImage2Plugin(Star):
         )
         normalized_resolution = self._normalize_resolution(resolution)
         if normalized_resolution != "auto":
-            if profile == "flexible" and normalized_resolution == "4k" and normalized_ratio not in VALID_4K_ASPECT_RATIOS:
+            if (
+                normalized_resolution == "4k"
+                and normalized_ratio not in VALID_4K_ASPECT_RATIOS
+                and (profile == "flexible" or self._model_supports_gpt_image_2_sizes())
+            ):
                 normalized_resolution = "2k"
             payload["resolution"] = normalized_resolution
 
@@ -1349,6 +1394,7 @@ class GPTImage2Plugin(Star):
         size: str | None,
         *,
         aspect_ratio: str | None,
+        resolution: str | None,
         reference_image_paths: list[str],
         prefer_reference_ratio: bool,
     ) -> str:
@@ -1363,6 +1409,12 @@ class GPTImage2Plugin(Star):
             prefer_reference_ratio=prefer_reference_ratio,
         )
         if ratio != "auto":
+            gpt_image_size = self._gpt_image_2_size_for_ratio(
+                ratio,
+                self._normalize_resolution(resolution),
+            )
+            if gpt_image_size:
+                return gpt_image_size
             return self._openai_size_for_ratio(ratio)
 
         configured_size = self._normalize_pixel_size(self._str_cfg("image", "size", "1024x1024"))
@@ -1467,6 +1519,21 @@ class GPTImage2Plugin(Star):
         if ratio_value > 1:
             return "1536x1024"
         return "1024x1536"
+
+    def _gpt_image_2_size_for_ratio(self, ratio: str, resolution: str) -> str:
+        if not self._model_supports_gpt_image_2_sizes():
+            return ""
+        tier = resolution if resolution in VALID_RESOLUTIONS else "auto"
+        if tier == "auto":
+            tier = self._normalize_resolution(None)
+        if tier == "auto":
+            return ""
+        sizes = GPT_IMAGE_2_SIZE_TABLE.get(tier, {})
+        if ratio in sizes:
+            return sizes[ratio]
+        if tier == "4k":
+            return GPT_IMAGE_2_SIZE_TABLE["2k"].get(ratio, "")
+        return ""
 
     def _normalize_compatible_size(
         self,
@@ -1809,6 +1876,10 @@ class GPTImage2Plugin(Star):
         if any(marker in model for marker in flexible_markers):
             return True
         return model in {"gpt-image-1.5", "gpt-image-1.5-official"}
+
+    def _model_supports_gpt_image_2_sizes(self) -> bool:
+        model = self._model_name().strip().lower()
+        return model == "gpt-image-2" or model.startswith("gpt-image-2-20")
 
     def _build_api_error(self, status: int, body: str) -> ImageAPIError:
         try:
