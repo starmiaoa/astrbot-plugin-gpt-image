@@ -79,7 +79,7 @@ GPT Image 图片生成插件，支持所有 GPT Image 系列模型。
 - 所有出站请求默认带一个 `Mozilla/5.0 (compatible; AstrBotGPTImagePlugin/...)` 风格的 User-Agent，避开 Cloudflare 默认拦截 `Python/aiohttp` 这类特征 UA 的规则。可在 `api.user_agent` 覆盖。
 - 上游 403/503 + 含 `cf-ray` / `cloudflare` 的 HTML 响应会被识别为 Cloudflare 拦截页，错误信息会带上 `cf-ray` ID，并提示用户改 `api.user_agent` 或联系中转放行 IP；不会把整页 HTML 直接糊给用户。
 - 网络重试耗尽后区分超时和其他错误：超时会把 `api.timeout_seconds` 实际值带到错误信息里，方便用户知道该调哪个参数。
-- 旧 `openai` / `two_api` 配置块仍然在代码里作为 fallback 读取，且尊重老的 `enabled` 开关。但只要用户在新 `api` 块里改过 `base_url`/`model`/`timeout_seconds` 任一字段，就视为已经迁移到新块，旧块里残留的 Key 不会再被偷偷打到新地址上(避免迁移后旧 Key 被错送到新中转翻车)。
+- 旧 `openai` / `two_api` 配置块仍然在代码里作为 fallback 读取，且尊重老的 `enabled` 开关。但只要用户在新 `api` 块里填了 Key，或把 `base_url`/`model`/`timeout_seconds` 改成非默认值，就视为已经迁移到新块，旧块里残留的 Key 不会再被偷偷打到新地址上。历史默认模型 `gpt-image-2` 不会单独触发“已迁移”判断，避免老用户升级后绕过旧配置。
 - 多图编辑上传时重复使用 multipart 字段名 `image`，不要改成 `image[]`，否则严格兼容 OpenAI 的接口可能拒收。
 - `size`、`resolution`、`aspect_ratio` 的归一化逻辑在 `main.py` 里集中处理。改动前建议分别用 OpenAI 标准接口和 2api 类接口验证两套档案路径。
 - LLM 工具默认后台生成并保留任务引用，避免长时间生图完成后无人发送结果。

@@ -3,9 +3,9 @@
 The plugin exposes a single API config block. Internally it keeps two
 parameter profiles (``standard`` and ``flexible``) that map to OpenAI's
 strict Images API and the looser webpage-reverse / 2api / ToAPIs dialect.
-A profile is picked per request from cache or heuristics; on a parameter
-or vague upstream compatibility error the request is retried once with the
-other profile, and the successful profile is cached per
+A profile is picked per request from cache or heuristics; on a clear
+parameter-format error the request is retried once with the other profile,
+and the successful profile is cached per
 ``(base_url, model, operation)``.
 """
 
@@ -153,6 +153,40 @@ NON_PROFILE_ERROR_KEYWORDS = (
     "unknown model",
     "does not exist",
 )
+PARAMETER_FORMAT_ERROR_KEYWORDS = (
+    "unknown parameter",
+    "unsupported parameter",
+    "unrecognized parameter",
+    "unrecognised parameter",
+    "unrecognized field",
+    "unrecognised field",
+    "unexpected field",
+    "invalid parameter",
+    "not a valid parameter",
+    "unrecognized request argument",
+    "unrecognised request argument",
+    "extra fields not permitted",
+    "unsupported field",
+    "invalid size",
+    "unsupported size",
+    "size must be",
+    "invalid resolution",
+    "unsupported resolution",
+    "resolution not supported",
+    "invalid background",
+    "unsupported background",
+)
+PAYLOAD_PARAMETER_FIELDS = {
+    "size",
+    "resolution",
+    "background",
+    "output_format",
+    "output_compression",
+    "quality",
+    "moderation",
+}
+PROFILE_RETRY_FIELDS = {"size", "resolution"}
+PAYLOAD_FALLBACK_FIELDS = {"background", "resolution"}
 
 # Defaults for the merged ``api`` config block. Used by ``_new_api_active`` to
 # tell whether the user has actually filled in the new block or is still on
@@ -160,6 +194,7 @@ NON_PROFILE_ERROR_KEYWORDS = (
 # the legacy ``openai`` / ``two_api`` blocks).
 DEFAULT_API_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_API_MODEL = "gpt-image-1.5"
+LEGACY_DEFAULT_API_MODELS = {"gpt-image-2"}
 DEFAULT_API_TIMEOUT = 180
 PROMPT_REWRITE_GUARD_PREFIX = "Use the following text as the complete prompt. Do not rewrite it:"
 
@@ -203,41 +238,71 @@ class ImageAPIError(RuntimeError):
     def should_try_other_profile(self) -> bool:
         """Whether retrying once with the other compat profile is useful.
 
-        Many OpenAI-compatible proxies return vague 5xx errors such as
-        ``openai_error`` for payloads they cannot translate. We only use this
-        on the first profile attempt, so a permissive answer costs at most one
-        extra request before surfacing the real error.
+        This is intentionally limited to clear parameter-format errors. Image
+        generation/edit POSTs are side-effecting, so vague 5xx responses should
+        surface instead of being retried with another payload dialect.
         """
         if self.status in {401, 403, 404, 429}:
             return False
-        haystack = f"{self.message}\n{self.body}".lower()
-        if any(keyword in haystack for keyword in CONTENT_POLICY_KEYWORDS):
+        if self._is_non_retriable_error():
             return False
-        if any(keyword in haystack for keyword in BILLING_KEYWORDS):
-            return False
-        if any(keyword in haystack for keyword in NON_PROFILE_ERROR_KEYWORDS):
-            return False
-        return self.status in {400, 422}
+        return self.is_parameter_format_error() and self._mentions_profile_retry_field()
 
     def should_try_payload_fallback(self) -> bool:
         """Whether a safer payload variant is worth trying.
 
-        Some reverse or OpenAI-compatible suppliers respond with vague 5xx
-        errors when a single optional field is unsupported. We only use this
-        for local payload downgrades such as removing ``background`` or
-        lowering ``resolution``; auth, quota, moderation, and missing-model
-        errors should surface immediately.
+        Only clear parameter-format errors should create another POST. Auth,
+        quota, moderation, missing-model, and vague upstream failures should
+        surface immediately.
         """
         if self.status in {401, 403, 404, 429}:
             return False
+        if self._is_non_retriable_error():
+            return False
+        return self.is_parameter_format_error() and self._mentions_payload_fallback_field()
+
+    def is_parameter_format_error(self) -> bool:
+        if self.status not in {400, 422}:
+            return False
+        haystack = f"{self.message}\n{self.body}".lower()
+        if any(keyword in haystack for keyword in PARAMETER_FORMAT_ERROR_KEYWORDS):
+            return True
+        return self.error_param() in PAYLOAD_PARAMETER_FIELDS
+
+    def error_param(self) -> str:
+        try:
+            data = json.loads(self.body)
+        except (json.JSONDecodeError, TypeError):
+            return ""
+        error = data.get("error", data) if isinstance(data, dict) else data
+        if not isinstance(error, dict):
+            return ""
+        raw_param = error.get("param") or error.get("parameter") or error.get("field")
+        if raw_param is None:
+            return ""
+        return str(raw_param).strip().lower()
+
+    def _is_non_retriable_error(self) -> bool:
         haystack = f"{self.message}\n{self.body}".lower()
         if any(keyword in haystack for keyword in CONTENT_POLICY_KEYWORDS):
-            return False
+            return True
         if any(keyword in haystack for keyword in BILLING_KEYWORDS):
-            return False
+            return True
         if any(keyword in haystack for keyword in NON_PROFILE_ERROR_KEYWORDS):
-            return False
-        return self.status in {400, 422}
+            return True
+        return False
+
+    def _mentions_profile_retry_field(self) -> bool:
+        param = self.error_param()
+        if param in PROFILE_RETRY_FIELDS:
+            return True
+        return self.mentions_any(("size", "resolution", "aspect_ratio", "aspect ratio"))
+
+    def _mentions_payload_fallback_field(self) -> bool:
+        param = self.error_param()
+        if param in PAYLOAD_FALLBACK_FIELDS:
+            return True
+        return self.mentions_any(("background", "transparent", "resolution", "4k"))
 
     def mentions_any(self, keywords: tuple[str, ...]) -> bool:
         haystack = f"{self.message}\n{self.body}".lower()
@@ -275,7 +340,7 @@ DEFAULT_TOOL_GUIDE = """
     PLUGIN_ID,
     "starmiaoa",
     "GPT Image 图片生成插件，支持所有 GPT Image 系列模型",
-    "1.2.14",
+    "1.2.15",
 )
 class GPTImage2Plugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
@@ -1008,8 +1073,19 @@ class GPTImage2Plugin(Star):
     def _payload_fallbacks(self, payload: dict[str, Any], error: ImageAPIError) -> list[dict[str, Any]]:
         fallbacks: list[dict[str, Any]] = []
         base = dict(payload)
-        background_error = error.mentions_any(("background", "transparent"))
-        resolution_error = error.mentions_any(("resolution", "size"))
+        error_param = error.error_param()
+        background_error = error_param == "background" or error.mentions_any(("background", "transparent"))
+        resolution_downgrade_error = error.mentions_any(
+            (
+                "4k",
+                "4096",
+                "3840",
+                "2160",
+                "resolution too high",
+                "unsupported resolution tier",
+                "resolution tier not supported",
+            )
+        )
 
         if base.get("background") == "transparent" and background_error:
             transparent_prompt_payload = dict(base)
@@ -1020,7 +1096,7 @@ class GPTImage2Plugin(Star):
             )
             fallbacks.append(transparent_prompt_payload)
 
-        if base.get("resolution") == "4k" and resolution_error:
+        if base.get("resolution") == "4k" and resolution_downgrade_error:
             downgraded_resolution_payload = self._downgrade_4k_payload(base)
             if downgraded_resolution_payload != base:
                 fallbacks.append(downgraded_resolution_payload)
@@ -1029,7 +1105,7 @@ class GPTImage2Plugin(Star):
             base.get("background") == "transparent"
             and base.get("resolution") == "4k"
             and background_error
-            and resolution_error
+            and resolution_downgrade_error
         ):
             combined_payload = self._downgrade_4k_payload(base)
             if background_error:
@@ -1546,7 +1622,7 @@ class GPTImage2Plugin(Star):
         value = value.replace("*", "x").replace(" ", "")
         if value in VALID_OPENAI_SIZES:
             return value
-        if self._use_gpt_image_2_extended_sizes() and re.fullmatch(r"\d{3,4}x\d{3,4}", value):
+        if self._allows_extended_pixel_size() and re.fullmatch(r"\d{3,4}x\d{3,4}", value):
             return value
         return ""
 
@@ -1575,6 +1651,9 @@ class GPTImage2Plugin(Star):
         size_ratio_from_pixels = self._ratio_from_pixel_size(size_value)
         if size_ratio_from_pixels:
             return size_ratio_from_pixels
+        raw_size_ratio_from_pixels = self._ratio_from_pixel_size(size)
+        if raw_size_ratio_from_pixels:
+            return raw_size_ratio_from_pixels
 
         if prefer_reference_ratio and reference_image_paths:
             reference_ratio = self._reference_image_aspect_ratio(reference_image_paths[0])
@@ -1592,6 +1671,9 @@ class GPTImage2Plugin(Star):
         configured_pixel_size = self._normalize_pixel_size(configured_size)
         if configured_pixel_size in OPENAI_SIZE_TO_RATIO:
             return OPENAI_SIZE_TO_RATIO[configured_pixel_size]
+        configured_raw_size_ratio = self._ratio_from_pixel_size(configured_size)
+        if configured_raw_size_ratio:
+            return configured_raw_size_ratio
 
         return "auto"
 
@@ -1677,13 +1759,17 @@ class GPTImage2Plugin(Star):
         reference_image_paths: list[str],
         prefer_reference_ratio: bool,
     ) -> str:
-        explicit_size = self._normalize_pixel_size(size)
-        if explicit_size:
-            return explicit_size
-
         explicit_ratio = self._parse_aspect_ratio(size)
         if explicit_ratio:
             return explicit_ratio
+
+        explicit_size_ratio = self._ratio_from_pixel_size(size)
+        if explicit_size_ratio:
+            return explicit_size_ratio
+
+        explicit_size = self._normalize_pixel_size(size)
+        if explicit_size:
+            return explicit_size
 
         ratio = self._normalize_aspect_ratio(
             aspect_ratio,
@@ -1695,12 +1781,15 @@ class GPTImage2Plugin(Star):
             return ratio
 
         configured_size = self._str_cfg("image", "size", "")
-        configured_pixel_size = self._normalize_pixel_size(configured_size)
-        if configured_pixel_size:
-            return configured_pixel_size
         configured_ratio = self._parse_aspect_ratio(configured_size)
         if configured_ratio:
             return configured_ratio
+        configured_size_ratio = self._ratio_from_pixel_size(configured_size)
+        if configured_size_ratio:
+            return configured_size_ratio
+        configured_pixel_size = self._normalize_pixel_size(configured_size)
+        if configured_pixel_size:
+            return configured_pixel_size
         return "auto"
 
     def _normalize_resolution(self, resolution: str | None) -> str:
@@ -1850,7 +1939,8 @@ class GPTImage2Plugin(Star):
         if base_url and base_url != DEFAULT_API_BASE_URL:
             return True
         model = self._str_cfg("api", "model", "")
-        if model and model != DEFAULT_API_MODEL:
+        default_like_models = {DEFAULT_API_MODEL, *LEGACY_DEFAULT_API_MODELS}
+        if model and model not in default_like_models:
             return True
         raw_timeout = section.get("timeout_seconds")
         if raw_timeout is not None:
@@ -1952,7 +2042,7 @@ class GPTImage2Plugin(Star):
         """
         # An explicit pixel size unambiguously speaks the strict OpenAI
         # dialect, so try ``standard`` first.
-        if self._normalize_pixel_size(size):
+        if self._normalize_pixel_size(size) or self._ratio_from_pixel_size(size):
             return "standard"
 
         # Webpage-reverse models often advertise broader aspect ratios through
@@ -1986,7 +2076,7 @@ class GPTImage2Plugin(Star):
         reference image for a known-flexible model is a stronger signal than
         whatever succeeded on an earlier request.
         """
-        if self._normalize_pixel_size(size):
+        if self._normalize_pixel_size(size) or self._ratio_from_pixel_size(size):
             return True
         explicit_ratio = self._parse_aspect_ratio(aspect_ratio) or self._parse_aspect_ratio(size)
         if explicit_ratio:
@@ -1997,6 +2087,8 @@ class GPTImage2Plugin(Star):
 
     def _model_prefers_flexible_profile(self) -> bool:
         """Whether the configured model name looks like a webpage-reverse SKU."""
+        if self._is_official_openai_endpoint():
+            return False
         model = self._model_name().lower()
         flexible_markers = (
             "-all",
@@ -2016,6 +2108,14 @@ class GPTImage2Plugin(Star):
 
     def _use_gpt_image_2_extended_sizes(self) -> bool:
         return self._model_supports_gpt_image_2_sizes() and not self._is_official_openai_endpoint()
+
+    def _allows_extended_pixel_size(self) -> bool:
+        if self._is_official_openai_endpoint():
+            return False
+        model = self._model_name().strip().lower()
+        if self._model_supports_gpt_image_2_sizes():
+            return True
+        return bool(re.search(r"\bgpt-image-2(?:[-_]|$)", model))
 
     def _is_official_openai_endpoint(self) -> bool:
         try:
