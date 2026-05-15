@@ -275,7 +275,7 @@ DEFAULT_TOOL_GUIDE = """
     PLUGIN_ID,
     "starmiaoa",
     "GPT Image 图片生成插件，支持所有 GPT Image 系列模型",
-    "1.2.13",
+    "1.2.14",
 )
 class GPTImage2Plugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
@@ -560,7 +560,9 @@ class GPTImage2Plugin(Star):
                     reference_image_paths=references,
                 )
                 payload_attempts = [payload]
-                for payload_idx, payload_attempt in enumerate(payload_attempts):
+                payload_idx = 0
+                while payload_idx < len(payload_attempts):
+                    payload_attempt = payload_attempts[payload_idx]
                     self._log_request_start(
                         operation=operation,
                         profile=profile,
@@ -589,6 +591,7 @@ class GPTImage2Plugin(Star):
                             payload_attempts.extend(self._payload_fallbacks(payload_attempt, exc))
                         has_payload_fallback = payload_idx + 1 < len(payload_attempts)
                         if has_payload_fallback:
+                            payload_idx += 1
                             continue
                         if idx == 0 and exc.should_try_other_profile():
                             # Worth a single retry with the other parameter dialect.
@@ -1005,12 +1008,8 @@ class GPTImage2Plugin(Star):
     def _payload_fallbacks(self, payload: dict[str, Any], error: ImageAPIError) -> list[dict[str, Any]]:
         fallbacks: list[dict[str, Any]] = []
         base = dict(payload)
-        background_error = error.mentions_any(
-            ("background", "transparent", "unsupported parameter", "unknown parameter", "invalid parameter")
-        )
-        resolution_error = error.mentions_any(
-            ("resolution", "unsupported parameter", "unknown parameter", "invalid parameter", "size")
-        )
+        background_error = error.mentions_any(("background", "transparent"))
+        resolution_error = error.mentions_any(("resolution", "size"))
 
         if base.get("background") == "transparent" and background_error:
             transparent_prompt_payload = dict(base)
@@ -1029,7 +1028,8 @@ class GPTImage2Plugin(Star):
         if (
             base.get("background") == "transparent"
             and base.get("resolution") == "4k"
-            and (background_error or resolution_error)
+            and background_error
+            and resolution_error
         ):
             combined_payload = self._downgrade_4k_payload(base)
             if background_error:
@@ -2001,7 +2001,6 @@ class GPTImage2Plugin(Star):
         flexible_markers = (
             "-all",
             "_all",
-            "official",
             "toapi",
             "2api",
             "reverse",
@@ -2009,7 +2008,7 @@ class GPTImage2Plugin(Star):
         )
         if any(marker in model for marker in flexible_markers):
             return True
-        return model in {"gpt-image-1.5", "gpt-image-1.5-official"}
+        return model in {"gpt-image-1.5"}
 
     def _model_supports_gpt_image_2_sizes(self) -> bool:
         model = self._model_name().strip().lower()

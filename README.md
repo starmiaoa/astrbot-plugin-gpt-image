@@ -14,7 +14,7 @@ GPT Image 图片生成插件，支持所有 GPT Image 系列模型。
 
 - `api.api_key`：供应商提供的 API Key。留空时会按环境变量回退读取，默认 `OPENAI_API_KEY` 在前；如果你之前是 2api/ToAPIs 用户(老配置里 `two_api.enabled` 开着)，会优先 `TWO_API_KEY`。
 - `api.base_url`：填到 `/v1` 即可，例如 `https://api.openai.com/v1`。插件会自动补 `/images/generations` 或 `/images/edits`。
-- `api.model`：按你的供应商要求填写，例如 `gpt-image-2`、`gpt-image-2-all`、`gpt-image-1.5-official`。
+- `api.model`：OpenAI 官方接口建议使用 `gpt-image-1.5`、`gpt-image-1` 或 `gpt-image-1-mini`；中转/网页逆向渠道按供应商要求填写，例如 `gpt-image-2`、`gpt-image-2-all`、`gpt-image-1.5-official`。
 - `api.timeout_seconds`：图像生成可能较慢，建议 120-300 秒。
 - `api.user_agent`：可选。留空时使用插件默认 UA（避开 Cloudflare 对 Python/aiohttp 默认 UA 的拦截规则）；只有当中转明确报 `HTTP 403 cf-ray=...` 或要求特定 UA 时才需要在这里覆盖。
 
@@ -24,8 +24,8 @@ GPT Image 图片生成插件，支持所有 GPT Image 系列模型。
 
 图片默认参数：
 
-- `image.size`：默认像素尺寸。默认 `auto`，表示不主动传 `size`。OpenAI 官方通常只接受固定像素尺寸；部分供应商支持更多 `宽x高`。
-- `image.resolution`：默认清晰度档位，支持 `auto`、`1k`、`2k`、`4k`。默认 `1k`，供应商支持时会生效，不支持时可能忽略。
+- `image.size`：默认像素尺寸。默认 `auto`。OpenAI 官方接口使用官方尺寸白名单；部分 GPT Image 2 兼容站支持更多 `宽x高`。
+- `image.resolution`：默认清晰度档位，支持 `auto`、`1k`、`2k`、`4k`。OpenAI 官方接口会通过 `size` 映射表达，不额外发送 `resolution` 字段；兼容/逆向渠道支持时会生效。
 - `image.aspect_ratio`：默认比例。支持比例参数的供应商会按比例出图；OpenAI 官方会近似映射为方图、横图或竖图。改图没传比例时优先按第一张参考图比例。
 - `image.max_reference_images`：最多参考图数量，GPT 图像编辑接口最多 16 张。
 - `runtime.retry_times`：网络抖动重试次数。默认 `1`，只用于下载图片等无副作用请求。生成/改图是 POST 任务提交，为避免超时后重复生成或重复扣费，插件不会自动重试这类请求。
