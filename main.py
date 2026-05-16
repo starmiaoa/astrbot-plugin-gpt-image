@@ -340,13 +340,14 @@ DEFAULT_TOOL_GUIDE = """
     PLUGIN_ID,
     "starmiaoa",
     "GPT Image 图片生成插件，支持所有 GPT Image 系列模型",
-    "1.2.15",
+    "1.2.16",
+    "https://github.com/starmiaoa/astrbot-plugin-gpt-image",
 )
 class GPTImage2Plugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
         self.config = config or {}
-        self._data_dir = StarTools.get_data_dir()
+        self._data_dir = StarTools.get_data_dir(plugin_name=PLUGIN_ID)
         self._image_dir = self._data_dir / "images"
         self._image_dir.mkdir(parents=True, exist_ok=True)
 
@@ -359,6 +360,22 @@ class GPTImage2Plugin(Star):
         # given (base_url, model, operation). Lets the next request skip the
         # auto-detect heuristic and the failure-retry roundtrip.
         self._compat_profile_cache: dict[tuple[str, str, str], str] = {}
+
+    async def terminate(self) -> None:
+        pending = {
+            *self._background_tasks,
+            *self._inflight_tool_tasks.values(),
+            *self._inflight_tool_turns.values(),
+        }
+        for task in pending:
+            if not task.done():
+                task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        self._background_tasks.clear()
+        self._inflight_tool_tasks.clear()
+        self._inflight_tool_turns.clear()
+        self._compat_profile_cache.clear()
 
     @filter.command("生图")
     async def generate_command(self, event: AstrMessageEvent):
@@ -710,39 +727,20 @@ class GPTImage2Plugin(Star):
         url = self._images_generation_url()
         headers = self._api_headers(api_key, content_type="application/json")
         timeout = aiohttp.ClientTimeout(total=max(10, self._timeout_seconds()))
-        retry_times = self._mutation_retry_times()
 
-        for attempt in range(retry_times + 1):
-            try:
-                async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
-                    async with session.post(url, headers=headers, json=payload) as resp:
-                        if resp.status in TRANSIENT_HTTP_STATUSES and attempt < retry_times:
-                            text = await self._read_limited_response_text(resp)
-                            await self._sleep_before_network_retry(
-                                attempt,
-                                operation="GPT Image generation",
-                                reason=f"HTTP {resp.status} {text[:200]}",
-                            )
-                            continue
-                        if resp.status >= 400:
-                            text = await self._read_limited_response_text(resp)
-                            raise self._build_api_error(resp.status, text)
-                        text = await resp.text()
-                        try:
-                            return json.loads(text)
-                        except json.JSONDecodeError as exc:
-                            raise RuntimeError("图像接口返回了无法解析的 JSON。") from exc
-            except self._transient_network_exceptions() as exc:
-                if attempt < retry_times:
-                    await self._sleep_before_network_retry(
-                        attempt,
-                        operation="GPT Image generation",
-                        reason=self._friendly_error(exc),
-                    )
-                    continue
-                raise RuntimeError(self._network_failure_message(exc, "图像接口请求失败")) from exc
-
-        raise RuntimeError("图像接口请求失败：网络重试后仍未返回结果。")
+        try:
+            async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
+                async with session.post(url, headers=headers, json=payload) as resp:
+                    if resp.status >= 400:
+                        text = await self._read_limited_response_text(resp)
+                        raise self._build_api_error(resp.status, text)
+                    text = await resp.text()
+                    try:
+                        return json.loads(text)
+                    except json.JSONDecodeError as exc:
+                        raise RuntimeError("图像接口返回了无法解析的 JSON。") from exc
+        except self._transient_network_exceptions() as exc:
+            raise RuntimeError(self._network_failure_message(exc, "图像接口请求失败")) from exc
 
     async def _post_images_edit_api(
         self,
@@ -753,62 +751,43 @@ class GPTImage2Plugin(Star):
         url = self._images_edit_url()
         headers = self._api_headers(api_key)
         timeout = aiohttp.ClientTimeout(total=max(10, self._timeout_seconds()))
-        retry_times = self._mutation_retry_times()
 
-        for attempt in range(retry_times + 1):
-            form = aiohttp.FormData()
-            for key, value in payload.items():
-                form.add_field(key, self._multipart_field_value(value))
+        form = aiohttp.FormData()
+        for key, value in payload.items():
+            form.add_field(key, self._multipart_field_value(value))
 
-            opened_files = []
+        opened_files = []
+        try:
+            for image_path in image_paths:
+                content_type = self._detect_image_content_type(image_path)
+                file_obj = open(image_path, "rb")
+                opened_files.append(file_obj)
+                form.add_field(
+                    "image",
+                    file_obj,
+                    filename=self._multipart_filename(image_path, content_type),
+                    content_type=content_type,
+                )
+
             try:
-                for image_path in image_paths:
-                    content_type = self._detect_image_content_type(image_path)
-                    file_obj = open(image_path, "rb")
-                    opened_files.append(file_obj)
-                    form.add_field(
-                        "image",
-                        file_obj,
-                        filename=self._multipart_filename(image_path, content_type),
-                        content_type=content_type,
-                    )
-
+                async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
+                    async with session.post(url, headers=headers, data=form) as resp:
+                        if resp.status >= 400:
+                            text = await self._read_limited_response_text(resp)
+                            raise self._build_api_error(resp.status, text)
+                        text = await resp.text()
+                        try:
+                            return json.loads(text)
+                        except json.JSONDecodeError as exc:
+                            raise RuntimeError("图像编辑接口返回了无法解析的 JSON。") from exc
+            except self._transient_network_exceptions() as exc:
+                raise RuntimeError(self._network_failure_message(exc, "图像编辑接口请求失败")) from exc
+        finally:
+            for file_obj in opened_files:
                 try:
-                    async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
-                        async with session.post(url, headers=headers, data=form) as resp:
-                            if resp.status in TRANSIENT_HTTP_STATUSES and attempt < retry_times:
-                                text = await self._read_limited_response_text(resp)
-                                await self._sleep_before_network_retry(
-                                    attempt,
-                                    operation="GPT Image edit",
-                                    reason=f"HTTP {resp.status} {text[:200]}",
-                                )
-                                continue
-                            if resp.status >= 400:
-                                text = await self._read_limited_response_text(resp)
-                                raise self._build_api_error(resp.status, text)
-                            text = await resp.text()
-                            try:
-                                return json.loads(text)
-                            except json.JSONDecodeError as exc:
-                                raise RuntimeError("图像编辑接口返回了无法解析的 JSON。") from exc
-                except self._transient_network_exceptions() as exc:
-                    if attempt < retry_times:
-                        await self._sleep_before_network_retry(
-                            attempt,
-                            operation="GPT Image edit",
-                            reason=self._friendly_error(exc),
-                        )
-                        continue
-                    raise RuntimeError(self._network_failure_message(exc, "图像编辑接口请求失败")) from exc
-            finally:
-                for file_obj in opened_files:
-                    try:
-                        file_obj.close()
-                    except Exception:
-                        logger.debug("Failed to close GPT Image upload file", exc_info=True)
-
-        raise RuntimeError("图像编辑接口请求失败：网络重试后仍未返回结果。")
+                    file_obj.close()
+                except Exception:
+                    logger.debug("Failed to close GPT Image upload file", exc_info=True)
 
     async def _save_image_from_response(self, response: dict[str, Any]) -> tuple[str, str | None]:
         normalized_response = self._extract_image_response(response)
@@ -911,23 +890,15 @@ class GPTImage2Plugin(Star):
     def _network_retry_times(self) -> int:
         return min(5, max(0, self._int_cfg("runtime", "retry_times", 1)))
 
-    def _mutation_retry_times(self) -> int:
-        # Image generation/edit requests are side-effecting POSTs. If the
-        # upstream accepts the job but the client times out before receiving the
-        # response, retrying can create a second paid image task. Until the
-        # supplier exposes a reliable idempotency key, keep POST retries off.
-        return 0
-
     def _log_request_start(self, *, operation: str, profile: str, payload: dict[str, Any]) -> None:
         url = self._images_edit_url() if operation == "edit" else self._images_generation_url()
         logger.info(
-            "GPT Image request start operation=%s profile=%s model=%s url=%s timeout=%s retry=%s size=%s resolution=%s",
+            "GPT Image request start operation=%s profile=%s model=%s url=%s timeout=%s mutation_retry=0 size=%s resolution=%s",
             operation,
             profile,
             payload.get("model", ""),
             url,
             self._timeout_seconds(),
-            self._mutation_retry_times(),
             payload.get("size", ""),
             payload.get("resolution", ""),
         )

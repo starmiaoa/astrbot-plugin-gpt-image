@@ -33,6 +33,18 @@
         "type": "string",
         "default": "",
         "hint": "留空使用插件默认 UA（避开 Cloudflare 默认拦截 Python/aiohttp 的规则）。如果你的中转要求特定 UA 才能访问，在这里覆盖；多数用户不用动。"
+      },
+      "organization": {
+        "description": "OpenAI Organization",
+        "type": "string",
+        "default": "",
+        "hint": "可选。只有 OpenAI 官方多组织账号需要填写；会作为 OpenAI-Organization 请求头发送。"
+      },
+      "project": {
+        "description": "OpenAI Project",
+        "type": "string",
+        "default": "",
+        "hint": "可选。只有 OpenAI 官方项目隔离需要填写；会作为 OpenAI-Project 请求头发送。"
       }
     }
   },
@@ -82,6 +94,19 @@
         "default": "auto",
         "options": ["auto", "transparent", "opaque"],
         "hint": "transparent 用于透明背景。供应商如果不支持该字段，可能会忽略或报错。"
+      },
+      "output_compression": {
+        "description": "输出压缩",
+        "type": "int",
+        "default": 0,
+        "slider": {"min": 0, "max": 100, "step": 1},
+        "hint": "仅 jpeg/webp 生效。0 表示不发送该参数；1-100 表示压缩质量，供应商不支持时请保持 0。"
+      },
+      "moderation": {
+        "description": "Moderation",
+        "type": "string",
+        "default": "",
+        "hint": "可选高级参数。留空不发送；只有供应商文档明确要求时再填写。"
       },
       "max_reference_images": {
         "description": "最多参考图数量",
@@ -158,6 +183,12 @@
         "type": "int",
         "default": 200,
         "hint": "超过数量后删除最旧文件。0 表示不按数量清理。"
+      },
+      "tool_instruction": {
+        "description": "工具使用说明",
+        "type": "string",
+        "default": "",
+        "hint": "高级选项。留空使用插件内置说明；填写后会替换注入给 LLM 的工具使用说明。"
       }
     }
   }
