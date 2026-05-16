@@ -184,9 +184,15 @@
         "default": 200,
         "hint": "超过数量后删除最旧文件。0 表示不按数量清理。"
       },
+      "strict_intent_check": {
+        "description": "严格检查工具调用意图",
+        "type": "bool",
+        "default": true,
+        "hint": "开启时，LLM 调用图片工具前会再用关键词确认用户确实在请求出图/改图，避免误调用。若遇到“帮我整一个 logo”“就按刚才的做”这类自然语言请求被拦截，可关闭此项以信任 LLM 的工具判断。"
+      },
       "tool_instruction": {
         "description": "工具使用说明",
-        "type": "string",
+        "type": "text",
         "default": "",
         "hint": "高级选项。留空使用插件内置说明；填写后会替换注入给 LLM 的工具使用说明。"
       }

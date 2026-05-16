@@ -31,6 +31,7 @@ GPT Image 图片生成插件，支持所有 GPT Image 系列模型。
 - `image.max_reference_images`：最多参考图数量，GPT 图像编辑接口最多 16 张。
 - `image.output_compression` / `image.moderation` / `runtime.tool_instruction` 是高级选项；不了解供应商文档时保持默认即可。
 - `runtime.retry_times`：网络抖动重试次数。默认 `1`，只用于下载图片等无副作用请求。生成/改图是 POST 任务提交，为避免超时后重复生成或重复扣费，插件不会自动重试这类请求。
+- `runtime.strict_intent_check`：默认开启。LLM 调用图片工具前会再做一层轻量意图确认，避免把普通聊天误判为出图；如果你更想完全信任 LLM 的工具判断，或遇到自然语言请求被拦截，可以关闭。
 - `prompt.prevent_prompt_rewrite`：默认开启，会在提示词前追加 `Use the following text as the complete prompt. Do not rewrite it:`，尽量避免 GPT 图像接口自行改写用户提示词。
 
 `image.size`、`image.resolution` 和 `image.aspect_ratio` 是三个不同概念：`size` 是具体像素尺寸，`resolution` 是 1K/2K/4K 清晰度档位，`aspect_ratio` 是画面比例。命令里显式传 `--size`、`--ratio` 或 `--resolution` 时，显式参数优先。
@@ -70,6 +71,8 @@ GPT Image 图片生成插件，支持所有 GPT Image 系列模型。
 - 分辨率只有用户明确要求 1K/2K/4K 时才传；否则使用 AstrBot 配置里的默认分辨率。
 
 函数工具和工具使用说明在插件内默认开启。需要禁止 bot 自动调用时，不用在插件配置里找开关，直接到 AstrBot 自带的函数工具开关里关闭 `generate_image_with_gpt_image_2` 即可。
+
+`runtime.strict_intent_check` 只影响 LLM 自动调用工具的二次拦截，不影响手动 `/生图`、`/改图` 命令。
 
 
 ## 开发说明

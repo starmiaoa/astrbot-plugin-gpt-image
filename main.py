@@ -356,6 +356,7 @@ class GPTImage2Plugin(Star):
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._inflight_tool_tasks: dict[str, asyncio.Task[tuple[str, str | None]]] = {}
         self._inflight_tool_turns: dict[str, asyncio.Task[tuple[str, str | None]]] = {}
+        self._warned_jpeg_transparent_output = False
         # In-memory cache of the compat profile that succeeded last time for a
         # given (base_url, model, operation). Lets the next request skip the
         # auto-detect heuristic and the failure-retry roundtrip.
@@ -399,8 +400,7 @@ class GPTImage2Plugin(Star):
             )
         )
         self._schedule_background_delivery(event, task, error_prefix="图片生成失败")
-        event.stop_event()
-        yield event.plain_result(self._tool_submitted_message())
+        yield event.plain_result(self._tool_submitted_message()).stop_event()
 
     @filter.command("改图")
     async def edit_command(self, event: AstrMessageEvent):
@@ -430,8 +430,7 @@ class GPTImage2Plugin(Star):
             )
         )
         self._schedule_background_delivery(event, task, error_prefix="图片修改失败")
-        event.stop_event()
-        yield event.plain_result(self._tool_submitted_message())
+        yield event.plain_result(self._tool_submitted_message()).stop_event()
 
     @filter.command("生图帮助")
     async def gptimage_help(self, event: AstrMessageEvent):
@@ -649,6 +648,7 @@ class GPTImage2Plugin(Star):
                         operation=operation,
                         profile=profile,
                         payload=payload_attempt,
+                        payload_variant=payload_idx,
                     )
                     try:
                         if references:
@@ -819,7 +819,7 @@ class GPTImage2Plugin(Star):
             actual_suffix = self._image_suffix_from_bytes(image_bytes)
             if actual_suffix:
                 file_path = file_path.with_suffix(actual_suffix)
-            file_path.write_bytes(image_bytes)
+            await asyncio.to_thread(file_path.write_bytes, image_bytes)
             return str(file_path), revised_prompt
 
         image_url = item.get("url")
@@ -858,7 +858,7 @@ class GPTImage2Plugin(Star):
                         actual_suffix = self._image_suffix_from_bytes(data, resp.headers.get("Content-Type", ""))
                         if actual_suffix:
                             file_path = file_path.with_suffix(actual_suffix)
-                        file_path.write_bytes(data)
+                        await asyncio.to_thread(file_path.write_bytes, data)
                         return file_path
             except self._transient_network_exceptions() as exc:
                 if attempt < retry_times:
@@ -890,12 +890,20 @@ class GPTImage2Plugin(Star):
     def _network_retry_times(self) -> int:
         return min(5, max(0, self._int_cfg("runtime", "retry_times", 1)))
 
-    def _log_request_start(self, *, operation: str, profile: str, payload: dict[str, Any]) -> None:
+    def _log_request_start(
+        self,
+        *,
+        operation: str,
+        profile: str,
+        payload: dict[str, Any],
+        payload_variant: int,
+    ) -> None:
         url = self._images_edit_url() if operation == "edit" else self._images_generation_url()
         logger.info(
-            "GPT Image request start operation=%s profile=%s model=%s url=%s timeout=%s mutation_retry=0 size=%s resolution=%s",
+            "GPT Image request start operation=%s profile=%s payload_variant=%d model=%s url=%s timeout=%s mutation_retry=disabled size=%s resolution=%s",
             operation,
             profile,
+            payload_variant,
             payload.get("model", ""),
             url,
             self._timeout_seconds(),
@@ -1018,6 +1026,11 @@ class GPTImage2Plugin(Star):
         configured_background = self._str_cfg("image", "background", "auto")
         output_format = self._output_format()
         if output_format == "jpeg" and (transparent_background or configured_background == "transparent"):
+            if not self._warned_jpeg_transparent_output:
+                logger.warning(
+                    "GPT Image output_format=jpeg does not support transparent background; using png for this request"
+                )
+                self._warned_jpeg_transparent_output = True
             output_format = "png"
         payload["output_format"] = output_format
 
@@ -1244,6 +1257,9 @@ class GPTImage2Plugin(Star):
         return "|".join(dict.fromkeys(parts)) or "global"
 
     def _message_allows_image_tool(self, event: AstrMessageEvent, *, use_reference_images: bool) -> bool:
+        if not self._bool_cfg("runtime", "strict_intent_check", True):
+            return True
+
         text = self._event_text(event)
         if not text:
             return False
