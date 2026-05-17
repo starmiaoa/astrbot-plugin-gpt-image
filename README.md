@@ -14,7 +14,7 @@ GPT Image 图片生成插件，支持所有 GPT Image 系列模型。
 
 - `api.api_key`：供应商提供的 API Key。留空时会按环境变量回退读取，默认 `OPENAI_API_KEY` 在前；如果你之前是 2api/ToAPIs 用户(老配置里 `two_api.enabled` 开着)，会优先 `TWO_API_KEY`。
 - `api.base_url`：填到 `/v1` 即可，例如 `https://api.openai.com/v1`。插件会自动补 `/images/generations` 或 `/images/edits`。
-- `api.model`：OpenAI 官方接口建议使用 `gpt-image-1.5`、`gpt-image-1` 或 `gpt-image-1-mini`；中转/网页逆向渠道按供应商要求填写，例如 `gpt-image-2`、`gpt-image-2-all`、`gpt-image-1.5-official`。
+- `api.model`：模型名称按供应商按实际模型名填写
 - `api.timeout_seconds`：图像生成可能较慢，建议 120-300 秒。
 - `api.user_agent`：可选。留空时使用插件默认 UA（避开 Cloudflare 对 Python/aiohttp 默认 UA 的拦截规则）；只有当中转明确报 `HTTP 403 cf-ray=...` 或要求特定 UA 时才需要在这里覆盖。
 - `api.organization` / `api.project`：OpenAI 官方多组织或项目隔离账号才需要填写；普通中转用户留空即可。
