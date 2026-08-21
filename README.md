@@ -17,6 +17,7 @@ GPT Image 图片生成插件，支持所有 GPT Image 系列模型。
 - `api.model`：模型名称按供应商按实际模型名填写
 - `api.timeout_seconds`：图像生成可能较慢，建议 120-300 秒。
 - `api.user_agent`：可选。留空时使用插件默认 UA（避开 Cloudflare 对 Python/aiohttp 默认 UA 的拦截规则）；只有当中转明确报 `HTTP 403 cf-ray=...` 或要求特定 UA 时才需要在这里覆盖。
+- `api.proxy`：可选。HTTP/HTTPS 代理服务器，例如 `http://127.0.0.1:7890`。填写后所有图像接口请求和图片下载都走该代理；留空则回退读取系统的 `http_proxy`/`https_proxy` 环境变量。仅支持 http/https 代理。
 - `api.organization` / `api.project`：OpenAI 官方多组织或项目隔离账号才需要填写；普通中转用户留空即可。
 
 插件内部维护两套参数档案 (`standard` 适配 OpenAI 标准 Images API；`flexible` 适配网页逆向/2api/ToAPIs)。一次请求会先按启发式或上次成功的档案下单；如果上游因为参数格式问题报错，再用另一套档案自动重试一次，成功的档案会缓存到下一次。所以无论你的供应商是哪一种格式都不用手动切换。
@@ -84,6 +85,7 @@ GPT Image 图片生成插件，支持所有 GPT Image 系列模型。
 - 所有出站请求默认带一个 `Mozilla/5.0 (compatible; AstrBotGPTImagePlugin/...)` 风格的 User-Agent，避开 Cloudflare 默认拦截 `Python/aiohttp` 这类特征 UA 的规则。可在 `api.user_agent` 覆盖。
 - 上游 403/503 + 含 `cf-ray` / `cloudflare` 的 HTML 响应会被识别为 Cloudflare 拦截页，错误信息会带上 `cf-ray` ID，并提示用户改 `api.user_agent` 或联系中转放行 IP；不会把整页 HTML 直接糊给用户。
 - 网络重试耗尽后区分超时和其他错误：超时会把 `api.timeout_seconds` 实际值带到错误信息里，方便用户知道该调哪个参数。
+- `api.proxy` 配置优先于环境变量代理，会同时作用于生成/编辑接口请求和图片下载；留空时由 aiohttp `trust_env` 读取系统的 `http_proxy`/`https_proxy` 环境变量。
 - 旧 `openai` / `two_api` 配置块仍然在代码里作为 fallback 读取，且尊重老的 `enabled` 开关。但只要用户在新 `api` 块里填了 Key，或把 `base_url`/`model`/`timeout_seconds` 改成非默认值，就视为已经迁移到新块，旧块里残留的 Key 不会再被偷偷打到新地址上。历史默认模型 `gpt-image-2` 不会单独触发“已迁移”判断，避免老用户升级后绕过旧配置。
 - 多图编辑上传时重复使用 multipart 字段名 `image`，不要改成 `image[]`，否则严格兼容 OpenAI 的接口可能拒收。
 - `size`、`resolution`、`aspect_ratio` 的归一化逻辑在 `main.py` 里集中处理。改动前建议分别用 OpenAI 标准接口和 2api 类接口验证两套档案路径。
