@@ -730,7 +730,7 @@ class GPTImage2Plugin(Star):
 
         try:
             async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
-                async with session.post(url, headers=headers, json=payload) as resp:
+                async with session.post(url, headers=headers, json=payload, proxy=self._proxy()) as resp:
                     if resp.status >= 400:
                         text = await self._read_limited_response_text(resp)
                         raise self._build_api_error(resp.status, text)
@@ -771,7 +771,7 @@ class GPTImage2Plugin(Star):
 
             try:
                 async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
-                    async with session.post(url, headers=headers, data=form) as resp:
+                    async with session.post(url, headers=headers, data=form, proxy=self._proxy()) as resp:
                         if resp.status >= 400:
                             text = await self._read_limited_response_text(resp)
                             raise self._build_api_error(resp.status, text)
@@ -837,7 +837,7 @@ class GPTImage2Plugin(Star):
         for attempt in range(retry_times + 1):
             try:
                 async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
-                    async with session.get(url, headers=headers) as resp:
+                    async with session.get(url, headers=headers, proxy=self._proxy()) as resp:
                         if resp.status in TRANSIENT_HTTP_STATUSES and attempt < retry_times:
                             text = await self._read_limited_response_text(resp)
                             await self._sleep_before_network_retry(
@@ -2012,6 +2012,10 @@ class GPTImage2Plugin(Star):
         if legacy is not None:
             return legacy
         return self._int_cfg("api", "timeout_seconds", DEFAULT_API_TIMEOUT)
+
+    def _proxy(self) -> str | None:
+        value = self._str_cfg("api", "proxy", "")
+        return value or None
 
     def _auto_detect_profile(
         self,
