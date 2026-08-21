@@ -340,7 +340,7 @@ DEFAULT_TOOL_GUIDE = """
     PLUGIN_ID,
     "starmiaoa",
     "GPT Image 图片生成插件，支持所有 GPT Image 系列模型",
-    "1.2.16",
+    "1.2.17",
     "https://github.com/starmiaoa/astrbot-plugin-gpt-image",
 )
 class GPTImage2Plugin(Star):
